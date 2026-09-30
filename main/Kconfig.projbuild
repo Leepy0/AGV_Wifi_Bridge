@@ -1,0 +1,122 @@
+menu "AGV Wi-Fi Bridge"
+
+    menu "Default config (runtime override: console 'set' + 'save')"
+
+        config BR_AGV_ID
+            int "AGV ID (1-99)"
+            range 1 99
+            default 1
+
+        config BR_WIFI_SSID
+            string "Wi-Fi SSID"
+            default "AGV_TEST"
+
+        config BR_WIFI_PASS
+            string "Wi-Fi password (empty = open)"
+            default "agv12345"
+
+        config BR_STATIC_IP
+            string "Static IP (empty = DHCP)"
+            default ""
+
+        config BR_NETMASK
+            string "Netmask"
+            default "255.255.255.0"
+
+        config BR_GATEWAY
+            string "Gateway"
+            default "0.0.0.0"
+
+        config BR_SERVER_IP
+            string "Server (Gateway) IP"
+            default "192.168.0.10"
+
+        config BR_SERVER_PORT
+            int "Server UDP port"
+            range 1 65535
+            default 50000
+
+        config BR_LOCAL_PORT
+            int "Local UDP port (downlink from server)"
+            range 1 65535
+            default 50000
+
+        config BR_RFID_DST_IP
+            string "RFID destination IP (255.255.255.255 = broadcast, empty = off)"
+            default "255.255.255.255"
+
+        config BR_RFID_DST_PORT
+            int "RFID destination UDP port"
+            range 1 65535
+            default 50001
+
+        config BR_MAIN_BAUD
+            int "Main board (J4) baud rate"
+            default 115200
+
+        config BR_RFID_BAUD
+            int "RFID reader baud rate"
+            default 9600
+
+        config BR_HB_MS
+            int "Heartbeat period ms (0 = off)"
+            range 0 60000
+            default 1000
+
+    endmenu
+
+    menu "Hardware pins"
+
+        config BR_MAIN_TX_GPIO
+            int "Main board UART1 TX GPIO (-> BOB T1IN)"
+            default 17
+
+        config BR_MAIN_RX_GPIO
+            int "Main board UART1 RX GPIO (<- BOB R1OUT)"
+            default 18
+
+        config BR_RFID_TX_GPIO
+            int "RFID UART2 TX GPIO (-> BOB T2IN)"
+            default 4
+
+        config BR_RFID_RX_GPIO
+            int "RFID UART2 RX GPIO (<- BOB R2OUT)"
+            default 5
+
+    endmenu
+
+    menu "Framing"
+
+        config BR_MAIN_ETX_FRAMING
+            bool "Main board RX: end frame at ETX (off = idle gap)"
+            default y
+            help
+                ETX 를 받는 즉시 프레임을 전달. 체크섬 문자가 ETX 값과 겹치지 않아야 함.
+
+        config BR_MAIN_ETX_CHAR
+            hex "ETX byte"
+            depends on BR_MAIN_ETX_FRAMING
+            default 0x03
+
+        config BR_MAIN_GAP_MS
+            int "Main board RX: idle gap (ms) - frame end in gap mode, forced flush in ETX mode"
+            range 1 20
+            default 3
+
+        config BR_RFID_GAP_MS
+            int "RFID RX: idle gap that ends a frame (ms)"
+            range 1 50
+            default 5
+
+        config BR_MAIN_TX_GAP_MS
+            int "Min idle gap between frames sent to main board (ms, 0 = off)"
+            range 0 20
+            default 0
+
+        config BR_RFID_TO_MAIN
+            bool "Forward RFID frames to main board"
+            default y
+
+    endmenu
+
+endmenu

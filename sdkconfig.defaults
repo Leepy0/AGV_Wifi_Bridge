@@ -1,0 +1,21 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 플래시/파티션 (S3 보드는 대부분 4MB 이상)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# 1ms tick — 프레임 간격(ms 단위) 제어용
+CONFIG_FREERTOS_HZ=1000
+
+# 로밍 대비 802.11k/v/r
+CONFIG_ESP_WIFI_11KV_SUPPORT=y
+CONFIG_ESP_WIFI_11R_SUPPORT=y
+
+# 무인 운용: 태스크 워치독 발생 시 재부팅
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# 플래시 쓰기(NVS save) 중에도 UART 수신 유지
+CONFIG_UART_ISR_IN_IRAM=y
+
+# DHCP 재연결 단축: 제안 IP ARP 확인 생략 (현장은 고정 IP 권장)
+CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
