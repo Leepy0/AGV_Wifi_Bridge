@@ -9,6 +9,7 @@
 #include "uart_bridge.h"
 #include "net_bridge.h"
 #include "console_cmd.h"
+#include "ota.h"
 
 static const char *TAG = "main";
 
@@ -44,6 +45,7 @@ void app_main(void)
 
     cfg_load();
     cfg_print();
+    ota_init();     // 새 펌웨어면 롤백 대기 시작 (서버 패킷 수신 시 확정)
 
     // UART 를 먼저 올려 Wi-Fi 가 안 붙어도 RFID → 메인보드 바이패스는 동작
     ESP_ERROR_CHECK(uart_bridge_start(on_main_frame, on_rfid_frame));

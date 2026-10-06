@@ -18,6 +18,7 @@
 #include "proto.h"
 #include "uart_bridge.h"
 #include "net_bridge.h"
+#include "ota.h"
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define BR_WIFI_BW20 WIFI_BW20
@@ -31,13 +32,17 @@ static const char *TAG = "net";
 #define RX_TASK_PRIO    11
 #define HB_TASK_PRIO    3
 #define DSCP_EF_TOS     0xB8    // DSCP 46(EF) — 유선 구간 QoS 마킹 (AP/스위치 설정에 따라 효과)
+#define RECONN_FAST_TRIES 5     // 연속 실패 이 횟수까지는 즉시 재접속, 이후 RECONN_SLOW_MS 간격
+#define RECONN_SLOW_MS  1000
 
 static EventGroupHandle_t s_evt;
 static esp_netif_t *s_netif;
 static int s_sock = -1;
 static net_stat_t s_st;
 // 타입별 순번 — 각 타입은 한 태스크에서만 송신하므로 잠금 불필요
-static uint16_t s_seq_main, s_seq_rfid, s_seq_status;
+static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota;
+static esp_timer_handle_t s_reconn_timer;
+static uint32_t s_fail_streak;          // 연속 접속 실패 횟수 (재접속 간격 조절용)
 
 bool net_is_up(void)
 {
@@ -86,6 +91,16 @@ bool net_send_rfid(const uint8_t *data, size_t len)
     return send_pkt(g_cfg.rfid_dst_ip, g_cfg.rfid_dst_port, BR_T_RFID, s_seq_rfid++, data, len);
 }
 
+bool net_send_ota_result(const uint8_t *data, size_t len)
+{
+    return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_OTA_RESULT, s_seq_ota++, data, len);
+}
+
+static void reconn_timer_cb(void *arg)
+{
+    esp_wifi_connect();
+}
+
 // 고정 IP: DHCP 를 연결 전에 한 번 멈춰 두면 연결 시 esp_netif 가 이 값으로 GOT_IP 를 발생시킴
 static esp_err_t set_static_ip(void)
 {
@@ -113,11 +128,17 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGW(TAG, "disconnected reason=%d rssi=%d", e->reason, e->rssi);
         // 로밍(BTM/FT) 중에는 드라이버가 직접 재접속하므로 개입하지 않음
         if (e->reason != WIFI_REASON_ROAMING) {
-            esp_wifi_connect();
+            // 처음 몇 번은 즉시 재접속(이동 중 AP 이탈 대응), 계속 실패하면(AP 꺼짐·비밀번호 오류) 간격을 둠
+            if (++s_fail_streak <= RECONN_FAST_TRIES) {
+                esp_wifi_connect();
+            } else if (s_reconn_timer) {
+                esp_timer_start_once(s_reconn_timer, RECONN_SLOW_MS * 1000);
+            }
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&e->ip_info.ip));
+        s_fail_streak = 0;
         xEventGroupSetBits(s_evt, BIT_UP);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
         ESP_LOGW(TAG, "lost ip");
@@ -132,6 +153,9 @@ static esp_err_t wifi_init(void)
     if (g_cfg.static_ip != 0) {
         ESP_RETURN_ON_ERROR(set_static_ip(), TAG, "static ip");
     }
+
+    const esp_timer_create_args_t ta = { .callback = reconn_timer_cb, .name = "reconn" };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&ta, &s_reconn_timer), TAG, "reconn timer");
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&ic), TAG, "wifi init");
@@ -214,6 +238,7 @@ static void net_rx_task(void *arg)
             continue;
         }
         s_st.rx_pkts++;
+        ota_confirm();      // 서버 하향 수신 = Wi-Fi·설정 정상 → 새 펌웨어 확정 (미확정 상태일 때만 동작)
 
         switch (h.type) {
         case BR_T_MAIN_DOWN:
@@ -230,6 +255,23 @@ static void net_rx_task(void *arg)
             // seq·payload 그대로 반송 → 서버에서 왕복 지연 계산
             send_pkt(src.sin_addr.s_addr, ntohs(src.sin_port), BR_T_PONG, h.seq, pl, h.len);
             break;
+        case BR_T_OTA_START: {
+            if (h.agv_id != g_cfg.agv_id) {
+                s_st.rx_foreign++;
+                break;
+            }
+            char url[256];
+            size_t n = h.len < sizeof(url) - 1 ? h.len : sizeof(url) - 1;
+            memcpy(url, pl, n);
+            url[n] = '\0';
+            esp_err_t err = ota_start(url);
+            if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {   // busy 는 ota_start 가 직접 보고
+                char js[80];
+                int m = snprintf(js, sizeof(js), "{\"stage\":\"fail\",\"err\":\"%s\"}", esp_err_to_name(err));
+                net_send_ota_result((const uint8_t *)js, (size_t)m);
+            }
+            break;
+        }
         default:
             s_st.rx_bad++;
             break;
@@ -240,8 +282,9 @@ static void net_rx_task(void *arg)
 // 주기 상태 보고 (서버에서 RSSI/로밍/오류 추이 기록용)
 static void hb_task(void *arg)
 {
-    char js[320];
-    const char *fw = esp_app_get_description()->version;
+    char js[400];
+    const char *fw   = esp_app_get_description()->version;
+    const char *part = ota_running_partition();
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(g_cfg.hb_ms));
@@ -256,10 +299,10 @@ static void hb_task(void *arg)
                             + r->overflow + r->rx_err + r->overlong;
 
         int n = snprintf(js, sizeof(js),
-                         "{\"fw\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
+                         "{\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
                          "\"disc\":%lu,\"reason\":%u,\"m_rx\":%lu,\"m_tx\":%lu,\"r_rx\":%lu,"
                          "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu}",
-                         fw, (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
+                         fw, part, ota_state_str(), (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
                          (unsigned long)s_st.disconnects, s_st.last_reason,
                          (unsigned long)m->rx_frames, (unsigned long)m->tx_frames, (unsigned long)r->rx_frames,
                          u_err, (unsigned long)s_st.tx_offline, (unsigned long)s_st.tx_err,
@@ -280,7 +323,7 @@ esp_err_t net_bridge_start(void)
     ESP_RETURN_ON_ERROR(sock_init(), TAG, "socket");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "wifi");
 
-    ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(net_rx_task, "net_rx", 4096, NULL, RX_TASK_PRIO, NULL, 1) == pdPASS,
+    ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(net_rx_task, "net_rx", 5120, NULL, RX_TASK_PRIO, NULL, 1) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "net_rx task");
     if (g_cfg.hb_ms > 0) {
         ESP_RETURN_ON_FALSE(xTaskCreate(hb_task, "hb", 4096, NULL, HB_TASK_PRIO, NULL) == pdPASS,

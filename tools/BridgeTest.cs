@@ -1,8 +1,9 @@
 // AGV Wi-Fi 브리지 벤치 테스트용 UDP 서버 (.NET 10 file-based app)
 // 실행: dotnet run BridgeTest.cs
-// 명령: list | send <agv> <data> | ping <agv> [횟수] | hb | quit
+// 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | hb | quit
 //   data 표기: <STX> <ETX> <CR> <LF> \xHH 사용 가능 (공백 유지)
 //   예) send 7 <STX>W1107C001X<ETX>
+//   ota 7 build\agv_wifi_bridge.bin  → 이 PC 가 HTTP(8070) 로 파일을 서비스하고 ESP 에 URL 전달
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -13,6 +14,7 @@ using System.Text;
 
 const int MainPort = 50000;   // ESP server_port (MAIN_UP / STATUS / PONG 수신, 하향 송신)
 const int RfidPort = 50001;   // ESP rfid_port (RFID 브로드캐스트 수신)
+const int HttpPort = 8070;    // OTA 펌웨어 파일 서비스용
 
 var agvs = new ConcurrentDictionary<byte, Agv>();
 var logLock = new object();
@@ -25,7 +27,7 @@ var rxMain = RxLoop(mainSock, cts.Token);
 var rxRfid = RxLoop(rfidSock, cts.Token);
 
 Log($"listening udp {MainPort} (main/status/pong), {RfidPort} (rfid)");
-Log("commands: list | send <agv> <data> | ping <agv> [count] | hb | quit");
+Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | hb | quit");
 
 while (Console.ReadLine() is { } line)
 {
@@ -78,6 +80,25 @@ while (Console.ReadLine() is { } line)
             break;
         }
 
+        case "ota" when p.Length == 3 && TryGetAgv(p[1], out var ag):
+        {
+            string url;
+            if (p[2].StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                url = p[2];
+            }
+            else
+            {
+                if (!File.Exists(p[2])) { Log($"file not found: {p[2]}"); break; }
+                FwServer.Serve(File.ReadAllBytes(p[2]), HttpPort, Log);
+                url = $"http://{LocalIpToward(ag.Ep!)}:{HttpPort}/fw.bin";
+            }
+            var pkt = Proto.Build(Proto.OtaStart, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(url));
+            mainSock.Send(pkt, pkt.Length, ag.Ep);
+            Log($"[{ag.Id:D2}] OTA_START {url}");
+            break;
+        }
+
         default:
             Log("unknown command or AGV not seen yet");
             break;
@@ -123,6 +144,9 @@ void Handle(byte[] b, IPEndPoint ep)
             if (showHb || gap.Length > 0) Log($"[{h.Agv:D2}] STAT {a.Status}{gap}");
             break;
         }
+        case Proto.OtaResult:
+            Log($"[{h.Agv:D2}] OTA  {Encoding.ASCII.GetString(pl)}");
+            break;
         case Proto.Pong when pl.Length == 8:
         {
             var ms = Stopwatch.GetElapsedTime(BinaryPrimitives.ReadInt64LittleEndian(pl)).TotalMilliseconds;
@@ -146,6 +170,14 @@ bool TryGetAgv(string s, out Agv a)
 void Log(string msg)
 {
     lock (logLock) Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+}
+
+// AGV 쪽으로 나가는 인터페이스의 로컬 IP (NIC 가 여러 개일 때 OTA URL 용)
+static IPAddress LocalIpToward(IPEndPoint remote)
+{
+    using var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+    s.Connect(remote);
+    return ((IPEndPoint)s.LocalEndPoint!).Address;
 }
 
 static UdpClient OpenUdp(int port)
@@ -195,10 +227,59 @@ static string Fmt(byte[] d)
     return $"{sb}  ({d.Length}B: {Convert.ToHexString(d)})";
 }
 
+// ───────── OTA 파일 서비스: 최소 HTTP 서버 (GET 전용, 마지막 Serve 호출 파일 제공) ─────────
+static class FwServer
+{
+    static TcpListener? _l;
+    static byte[] _data = [];
+
+    public static void Serve(byte[] data, int port, Action<string> log)
+    {
+        _data = data;
+        if (_l is not null) return;
+        _l = new TcpListener(IPAddress.Any, port);
+        _l.Start();
+        log($"http file server on :{port} ({data.Length} bytes)");
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                var c = await _l.AcceptTcpClientAsync();
+                _ = Task.Run(() => HandleClient(c, log));
+            }
+        });
+    }
+
+    static async Task HandleClient(TcpClient c, Action<string> log)
+    {
+        using (c)
+        {
+            c.NoDelay = true;
+            var ns = c.GetStream();
+            var buf = new byte[2048];
+            var req = new StringBuilder();
+            // 요청 헤더 끝(빈 줄)까지만 읽음
+            while (!req.ToString().Contains("\r\n\r\n"))
+            {
+                int n = await ns.ReadAsync(buf);
+                if (n <= 0) return;
+                req.Append(Encoding.ASCII.GetString(buf, 0, n));
+            }
+            var data = _data;
+            log($"http {c.Client.RemoteEndPoint} {req.ToString().Split("\r\n")[0]} -> {data.Length} bytes");
+            var hdr = $"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {data.Length}\r\nConnection: close\r\n\r\n";
+            await ns.WriteAsync(Encoding.ASCII.GetBytes(hdr));
+            await ns.WriteAsync(data);
+            await ns.FlushAsync();
+        }
+    }
+}
+
 // ───────── 패킷 규격 (펌웨어 proto.h 와 동일) ─────────
 static class Proto
 {
-    public const byte MainUp = 0x01, MainDown = 0x02, Rfid = 0x03, Status = 0x10, Ping = 0x20, Pong = 0x21;
+    public const byte MainUp = 0x01, MainDown = 0x02, Rfid = 0x03, Status = 0x10, Ping = 0x20, Pong = 0x21,
+                      OtaStart = 0x30, OtaResult = 0x31;
     const byte Magic0 = 0xA5, Magic1 = 0x5A, Ver = 1;
     const int HdrLen = 10;
 

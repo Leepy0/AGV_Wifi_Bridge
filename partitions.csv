@@ -1,0 +1,7 @@
+# OTA 용 파티션 (4MB 플래시). ota_0/ota_1 두 슬롯에 번갈아 기록, otadata 로 부팅 슬롯·롤백 상태 관리
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

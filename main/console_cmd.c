@@ -7,6 +7,8 @@
 #include "app_config.h"
 #include "uart_bridge.h"
 #include "net_bridge.h"
+#include "ota.h"
+#include "esp_app_desc.h"
 #include "console_cmd.h"
 
 static const char *TAG = "console";
@@ -80,6 +82,26 @@ static int cmd_stat(int argc, char **argv)
     return 0;
 }
 
+// ota            : 상태 표시
+// ota <url>      : 벤치용 수동 업데이트 (현장은 서버가 OTA_START 패킷으로 지시)
+// ota confirm    : 롤백 대기 중인 펌웨어를 수동 확정
+static int cmd_ota(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "confirm") == 0) {
+        ota_confirm();
+    } else if (argc == 2) {
+        esp_err_t err = ota_start(argv[1]);
+        if (err != ESP_OK) {
+            printf("ota start failed: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        printf("ota started - progress is sent to server, reboot on success\n");
+        return 0;
+    }
+    printf("fw=%s part=%s state=%s\n", esp_app_get_description()->version, ota_running_partition(), ota_state_str());
+    return 0;
+}
+
 static int cmd_mon(int argc, char **argv)
 {
     if (argc == 2) {
@@ -118,6 +140,7 @@ void console_start(void)
         { .command = "reboot",   .help = "restart",                             .func = cmd_reboot },
         { .command = "stat",     .help = "wifi / network / uart counters",      .func = cmd_stat },
         { .command = "mon",      .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
+        { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_console_cmd_register(&cmds[i]));

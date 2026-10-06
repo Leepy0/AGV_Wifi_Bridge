@@ -18,6 +18,8 @@ typedef enum {
     BR_T_STATUS    = 0x10, // 상태 heartbeat (JSON 텍스트)
     BR_T_PING      = 0x20, // 서버 → ESP, 왕복 지연 측정
     BR_T_PONG      = 0x21, // ESP → 서버, PING 의 seq/payload 그대로 반송
+    BR_T_OTA_START = 0x30, // 서버 → ESP, payload = 펌웨어 URL (ASCII, http://서버/파일.bin)
+    BR_T_OTA_RESULT= 0x31, // ESP → 서버, JSON: stage(start/progress/done/fail/busy), pct, err
 } br_type_t;
 
 typedef struct {

@@ -1,8 +1,14 @@
 CONFIG_IDF_TARGET="esp32s3"
 
-# 플래시/파티션 (S3 보드는 대부분 4MB 이상)
+# 플래시/파티션 (S3 보드는 대부분 4MB 이상) — OTA 두 슬롯 (partitions.csv)
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA 롤백: 새 펌웨어가 서버 통신을 확인하기 전에 재부팅되면 이전 슬롯으로 복귀
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# 현장 서버는 사내망 HTTP (인증서 관리 부담 없음)
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
 # 1ms tick — 프레임 간격(ms 단위) 제어용
 CONFIG_FREERTOS_HZ=1000
@@ -14,7 +20,7 @@ CONFIG_ESP_WIFI_11R_SUPPORT=y
 # 무인 운용: 태스크 워치독 발생 시 재부팅
 CONFIG_ESP_TASK_WDT_PANIC=y
 
-# 플래시 쓰기(NVS save) 중에도 UART 수신 유지
+# 플래시 쓰기(NVS save, OTA) 중에도 UART 수신 유지
 CONFIG_UART_ISR_IN_IRAM=y
 
 # DHCP 재연결 단축: 제안 IP ARP 확인 생략 (현장은 고정 IP 권장)

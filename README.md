@@ -13,6 +13,21 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 - **RFID 리더 → 네트워크**: 브로드캐스트(기본값) 또는 지정 IP 로 송신합니다.
 - 메인보드로 가는 데이터(RFID, ACS 하향)는 송신 태스크 하나가 **프레임 단위로** 내보냅니다. 두 데이터가 섞이지 않습니다.
 
+## 빌드 없이 굽기 (GitHub Actions 빌드 결과)
+
+푸시할 때마다 Actions 가 ESP-IDF v6.1 로 빌드합니다. `v*` 태그를 푸시하면 **Releases** 에 zip 이 첨부됩니다.
+
+1. Releases(또는 Actions 아티팩트)에서 `agv_wifi_bridge_<버전>.zip` 을 받아 풉니다.
+2. 보드를 USB(UART 포트 쪽)로 연결하고 실행합니다.
+   ```
+   flash.bat COM5
+   ```
+   Arduino IDE 가 깔려 있으면 ESP32 코어에 포함된 `esptool.exe` 를 자동으로 찾아 씁니다. 없으면 `pip install esptool`.
+   Arduino IDE 자체로는 미리 빌드한 .bin 을 올릴 수 없으니(스케치 컴파일 전용) 이 스크립트나 Espressif Flash Download Tool 을 씁니다.
+3. 처음 한 번만 USB 로 굽고, 이후 버전은 OTA 로 올립니다 (아래).
+
+zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridge.bin`(OTA 용 앱만), bootloader / partition-table / ota_data 개별 파일, `flash_args`.
+
 ## 개발 환경
 
 - ESP-IDF **v6.1** (v5.5 도 빌드 가능하도록 작성)
@@ -23,6 +38,18 @@ idf.py set-target esp32s3
 idf.py menuconfig        # AGV Wi-Fi Bridge 메뉴: 기본 SSID/서버 IP/핀/프레임 간격
 idf.py -p COM5 flash monitor
 ```
+
+## OTA 무선 업데이트
+
+파티션은 `ota_0` / `ota_1` 두 슬롯(각 1.9MB)이며 롤백이 켜져 있습니다.
+
+- 서버가 `OTA_START`(0x30) 패킷에 URL 을 담아 보내면 ESP 가 HTTP 로 `agv_wifi_bridge.bin` 을 받아 빈 슬롯에 기록하고 재부팅합니다.
+- 진행 상황은 `OTA_RESULT`(0x31) JSON 으로 옵니다: `start` → `progress`(10% 단위) → `done`(재부팅) / `fail`(err) / `busy`.
+- 새 펌웨어로 부팅하면 **서버에서 하향 패킷(PING 등)을 한 번 받을 때** 확정됩니다. 180초 안에 서버 통신이 없으면 이전 슬롯으로 자동 롤백합니다. 상태는 heartbeat 의 `ota` 필드(`pending`/`valid`/`busy`)와 `part` 로 확인합니다.
+- 프로젝트 이름이 다른 이미지는 거부합니다.
+- 업데이트 중에도 UART 중계는 계속되지만 플래시 기록 중 수 ms 지연이 생기고, 재부팅으로 1~2초 끊깁니다. **AGV 정지 상태에서만** 보내고, 다수 호기는 순차로 진행하세요.
+
+벤치: `BridgeTest` 에서 `ota 7 build\agv_wifi_bridge.bin` — PC 가 8070 포트로 파일을 서비스하고 URL 을 전달합니다. 콘솔에서는 `ota http://...` / `ota confirm` / `ota`(상태).
 
 ## 호기별 설정 (재빌드 없이)
 
@@ -48,6 +75,7 @@ bridge> reboot
 | `defaults` | 저장된 설정 삭제 → menuconfig 기본값 사용 |
 | `stat` | Wi-Fi(RSSI, BSSID), 송수신·오류 카운터 (`tx_offline`: Wi-Fi 끊김 중 폐기, `tx_drop`: 메인보드 송신 폐기) |
 | `mon 1` / `mon 0` | 모든 프레임 hex 덤프 (벤치 확인용) |
+| `ota` / `ota <url>` / `ota confirm` | 펌웨어 상태 / 수동 OTA / 롤백 대기 수동 확정 |
 
 ## 기본 핀
 
@@ -91,8 +119,11 @@ bridge> reboot
 | `0x10` STATUS | ESP → 서버 | JSON: rssi, ch, bssid, disc(끊김 횟수), 카운터 (기본 1초 주기) |
 | `0x20` PING | 서버 → ESP | 임의 (타임스탬프) |
 | `0x21` PONG | ESP → 서버 | PING 의 seq·payload 그대로 |
+| `0x30` OTA_START | 서버 → ESP | 펌웨어 URL (ASCII, AGV ID 일치 시만) |
+| `0x31` OTA_RESULT | ESP → 서버 | JSON: stage(start/progress/done/fail/busy), pct, err |
 
-- 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다.
+- 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어가 확정(롤백 취소)됩니다.
+- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy) 가 포함됩니다.
 - 서버는 ESP 가 보낸 패킷의 송신 endpoint(IP:50000)를 기억했다가 그곳으로 하향 송신하면 됩니다.
 - Wi-Fi 가 끊긴 동안의 상향 프레임은 **버퍼링하지 않고 폐기**합니다. 지난 교통제어 패킷이 늦게 도착하는 것보다 메인보드 재전송이 안전합니다. seq 는 계속 증가하므로 서버에서 누락 구간이 보입니다.
 
@@ -105,11 +136,12 @@ bridge> reboot
 
 ```bash
 cd tools
-dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | hb | quit
+dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | hb | quit
 ```
 
 ## 적용 전 확인·다음 단계
 
 - AGV 장착 시에는 BOB-11189 대신 절연형(TD301D232H ×2)을 사용합니다. GND 전위차·모터 노이즈 대책입니다.
 - 다중 AP 구간에서는 `menuconfig > Component config > Wi-Fi > Advanced support for Wi-Fi Roaming` 을 검토하세요(RSSI 기반 선제 로밍).
-- 400대 운용 시 OTA 파티션 구성과 서버 측 Gateway(ACS 소켓 연동)가 필요합니다.
+- Wi-Fi 재접속: 연속 5회까지는 즉시, 그 이후(AP 꺼짐·비밀번호 오류)는 1초 간격으로 시도합니다.
+- 400대 운용 시 서버 측 Gateway(ACS 소켓 연동, OTA 순차 배포)가 필요합니다.

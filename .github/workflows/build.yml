@@ -1,0 +1,82 @@
+# ESP-IDF 빌드 → 플래시용 바이너리 묶음(zip) 업로드
+#  - main 푸시 / 수동 실행: Actions 아티팩트
+#  - v* 태그 푸시        : GitHub Release 에 첨부 (다운로드 URL 고정)
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version string
+        id: ver
+        run: |
+          BASE=$(grep -oP 'set\(PROJECT_VER "\K[^"]+' CMakeLists.txt)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="${BASE}-${GITHUB_SHA::7}"
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "version: $VER"
+
+      - name: ESP-IDF build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32s3
+          command: idf.py -DPROJECT_VER=${{ steps.ver.outputs.ver }} build merge-bin
+
+      - name: Package
+        run: |
+          OUT=dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}
+          mkdir -p "$OUT"
+          sudo cp build/bootloader/bootloader.bin \
+                  build/partition_table/partition-table.bin \
+                  build/ota_data_initial.bin \
+                  build/agv_wifi_bridge.bin \
+                  build/flash_args "$OUT/"
+          sudo cp build/merged-binary.bin "$OUT/agv_wifi_bridge_merged.bin"
+          cp tools/flash.bat tools/flash.sh "$OUT/"
+          sudo chown -R "$USER" dist
+          cat > "$OUT/README.txt" <<TXT
+          AGV Wi-Fi Bridge ${{ steps.ver.outputs.ver }} (ESP32-S3, ESP-IDF v6.1)
+
+          [USB 로 처음 굽기 — 전체 이미지]
+            flash.bat COM5              (Windows, esptool 자동 탐색)
+            ./flash.sh /dev/ttyUSB0     (Linux/macOS)
+            = esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 agv_wifi_bridge_merged.bin
+
+          [OTA — 서버에서 무선 업데이트]
+            agv_wifi_bridge.bin 만 HTTP 로 서비스하고 OTA_START 패킷으로 URL 전달
+            (BridgeTest: ota <agv> agv_wifi_bridge.bin)
+
+          [개별 오프셋]  flash_args 참조 (bootloader 0x0, partition-table 0x8000, ota_data 0xf000, app 0x20000)
+          TXT
+          cd dist && zip -r "agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip" "agv_wifi_bridge_${{ steps.ver.outputs.ver }}"
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agv_wifi_bridge_${{ steps.ver.outputs.ver }}
+          path: dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/
+
+      - name: Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip
+            dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin
+            dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge_merged.bin
+          generate_release_notes: true
