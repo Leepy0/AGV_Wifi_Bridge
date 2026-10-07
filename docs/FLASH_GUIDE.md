@@ -25,7 +25,7 @@ zip 내용:
 | `bootloader.bin` | 개별 굽기용 | 0x0 |
 | `partition-table.bin` | 개별 굽기용 | 0x8000 |
 | `ota_data_initial.bin` | 부팅 슬롯 초기화 | 0xf000 |
-| `flash_args` | 개별 주소 목록 (`esptool write_flash @flash_args`) | |
+| `flash_args` | 개별 파일 주소 목록 (esptool v5: `esptool --chip esp32s3 -p COM5 write_flash @flash_args`) | |
 | `flash.bat` / `flash.sh` | 굽기 스크립트 (Windows / Linux·macOS) | |
 
 ## 2. USB 연결·포트 확인
@@ -72,6 +72,12 @@ esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 agv_wifi_bridge_merged.
 > ```
 >
 > 완전히 지우고 새로 시작하려면 `esptool --chip esp32s3 -p COM5 erase_flash` 후 전체 이미지를 굽습니다.
+>
+> 개별 파일로 굽는 경우 — 부트로더·파티션까지 새로 쓰지만 NVS(0x9000) 는 건드리지 않으므로 **설정이 유지됩니다**:
+>
+> ```bash
+> esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin
+> ```
 
 ### 연결이 안 될 때 (`Failed to connect to ESP32-S3`)
 
