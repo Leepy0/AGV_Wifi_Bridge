@@ -12,6 +12,7 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 - **RFID 리더 → 메인보드**: 기존 통신보드처럼 바이패스합니다. Wi-Fi 연결과 무관하게 동작합니다.
 - **RFID 리더 → 네트워크**: 브로드캐스트(기본값) 또는 지정 IP 로 송신합니다.
 - 메인보드로 가는 데이터(RFID, ACS 하향)는 송신 태스크 하나가 **프레임 단위로** 내보냅니다. 두 데이터가 섞이지 않습니다.
+- **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰(설정 AP 웹 페이지)으로도 바꿀 수 있습니다.
 
 ## 빌드 없이 굽기 (GitHub Actions 빌드 결과)
 
@@ -35,7 +36,7 @@ zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridg
 
 ```bash
 idf.py set-target esp32s3
-idf.py menuconfig        # AGV Wi-Fi Bridge 메뉴: 기본 SSID/서버 IP/핀/프레임 간격
+idf.py menuconfig        # AGV Wi-Fi Bridge 메뉴: 기본 SSID/서버 IP/핀/프레임 간격/설정 AP
 idf.py -p COM5 flash monitor
 ```
 
@@ -52,6 +53,16 @@ idf.py -p COM5 flash monitor
 벤치: `BridgeTest` 에서 `ota 7 build\agv_wifi_bridge.bin` — PC 가 8070 포트로 파일을 서비스하고 URL 을 전달합니다. 콘솔에서는 `ota http://...` / `ota confirm` / `ota`(상태).
 
 ## 호기별 설정 (재빌드 없이)
+
+세 방법 모두 같은 키(`agv`, `ssid`, `pass`, `ip` …)를 쓰고, **저장 후 재부팅해야 적용**됩니다.
+
+| 방법 | 쓰는 경우 | 연결 |
+|---|---|---|
+| USB 시리얼 콘솔 | 벤치, 처음 굽을 때 | USB 케이블 |
+| 서버 원격 설정 (UDP) | 운용 중인 호기의 IP·서버 주소·보드레이트 등 변경 | 기존 Wi-Fi |
+| 설정 AP (휴대폰 웹) | 처음 설치, SSID/비밀번호가 틀려 Wi-Fi 에 못 붙을 때 | ESP 가 직접 띄우는 AP |
+
+### 1. USB 시리얼 콘솔 (유선)
 
 USB 시리얼 콘솔(115200)에서 입력합니다. DevKitC 기준 **UART 포트** 쪽 USB 입니다.
 
@@ -76,6 +87,48 @@ bridge> reboot
 | `stat` | Wi-Fi(RSSI, BSSID), 송수신·오류 카운터 (`tx_offline`: Wi-Fi 끊김 중 폐기, `tx_drop`: 메인보드 송신 폐기) |
 | `mon 1` / `mon 0` | 모든 프레임 hex 덤프 (벤치 확인용) |
 | `ota` / `ota <url>` / `ota confirm` | 펌웨어 상태 / 수동 OTA / 롤백 대기 수동 확정 |
+| `setup` / `setup on` / `setup off` | 설정 AP 상태 / 열기 / 닫기 |
+
+### 2. 서버 원격 설정 (무선, UDP)
+
+서버가 `CFG_CMD`(0x40) 패킷에 콘솔과 같은 명령 한 줄을 담아 보내면 결과가 `CFG_RESULT`(0x41) 텍스트로 돌아옵니다. 설정된 `server` IP 에서 온, AGV ID 가 일치하는 패킷만 처리합니다.
+
+```
+cfg 7                          # (BridgeTest) 현재 설정 — 비밀번호는 길이만 표시
+cfg 7 set ip 192.168.10.107
+cfg 7 set ssid AGV WIFI 2F     # 값은 줄 끝까지 (공백 있는 SSID 가능)
+cfg 7 save
+cfg 7 reboot
+```
+
+명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `setup on|off` (`defaults` 는 원격에서 불가)
+
+- **원격 저장은 확인 대기 상태로 저장됩니다.** 재부팅 후 180초 안에 서버에서 하향 패킷(PING 등)을 받지 못하면 저장 직전 설정으로 되돌리고 다시 재부팅합니다. SSID·IP·서버 주소를 잘못 넣어도 호기와 연결이 끊긴 채로 남지 않습니다(OTA 롤백과 같은 기준).
+- 서버 IP 를 바꾼 경우에는 **새 서버**가 180초 안에 패킷을 보내야 확정됩니다.
+- 상태는 `cfg` 출력의 `state=` 와 heartbeat 의 `cfg`(`saved` / `trial` / `default`)로 봅니다.
+- 콘솔이나 설정 AP 에서 저장하면 현장 확인으로 보고 대기 중인 복구를 취소합니다.
+- 인증은 서버 IP 필터뿐입니다(`OTA_START` 와 같은 수준). 사내망 전제입니다.
+
+### 3. 설정 AP (무선, 휴대폰)
+
+ESP 가 직접 AP 를 띄우고 웹 페이지로 설정합니다. 그동안 브리지(STA) 중계는 그대로 동작합니다.
+
+1. AP 열기 — 다음 중 하나
+   - 저장된 설정이 없을 때(처음 설치, `defaults` 후) 부팅하면 자동으로 열림
+   - **BOOT 버튼(GPIO0) 3초** 누름
+   - 콘솔 `setup on` / 서버 `cfg 7 setup on`
+2. 휴대폰 Wi-Fi 목록에서 `AGVBR-<호기>-<MAC 끝 4자리>` 에 접속합니다. 비밀번호 기본값은 `agvsetup` 이니 menuconfig 에서 바꾸세요.
+3. 브라우저에서 `http://192.168.4.1` 을 열어 값을 고치고 **저장 후 재부팅**을 누릅니다.
+
+- 비밀번호 칸을 비우면 기존 값을 유지하고, `-` 를 넣으면 비밀번호 없음입니다.
+- 값이 하나라도 잘못되면 아무것도 저장하지 않고 해당 항목을 알려 줍니다.
+- 접속한 단말 없이 Wi-Fi 연결 상태가 5분 지나면 AP 가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
+- 휴대폰이 접속해 있는 동안은 Wi-Fi(STA) 재접속을 멈춥니다. 재접속 스캔 중에는 AP 가 다른 채널로 빠져 휴대폰 연결이 끊기기 때문입니다.
+- 웹 페이지는 설정 AP 쪽으로 들어온 요청만 받습니다. 공장망 IP 로는 열리지 않습니다.
+- AP 대역은 192.168.4.0/24 입니다. 공장망이 같은 대역이면 주소가 겹칩니다.
+- AP 를 열면 같은 채널에 비콘이 하나 늘어납니다. 여러 호기에서 동시에 열어 두지 마세요(heartbeat `ap` 필드로 확인).
+
+`menuconfig > AGV Wi-Fi Bridge > Wireless setup` 에서 AP 비밀번호, 자동 종료 시간, 첫 부팅 자동 열기, 버튼 GPIO(-1 = 사용 안 함)를 바꿀 수 있습니다.
 
 ## 기본 핀
 
@@ -121,9 +174,11 @@ bridge> reboot
 | `0x21` PONG | ESP → 서버 | PING 의 seq·payload 그대로 |
 | `0x30` OTA_START | 서버 → ESP | 펌웨어 URL (ASCII, AGV ID 일치 시만) |
 | `0x31` OTA_RESULT | ESP → 서버 | JSON: stage(start/progress/done/fail/busy), pct, err |
+| `0x40` CFG_CMD | 서버 → ESP | 설정 명령 한 줄 (텍스트, AGV ID 일치 시만) |
+| `0x41` CFG_RESULT | ESP → 서버 | 명령 결과 텍스트 (seq = 요청 seq) |
 
-- 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어가 확정(롤백 취소)됩니다.
-- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy) 가 포함됩니다.
+- 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어와 원격 변경 설정이 확정(롤백 취소)됩니다.
+- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `ap`(설정 AP 1/0) 가 포함됩니다.
 - 서버는 ESP 가 보낸 패킷의 송신 endpoint(IP:50000)를 기억했다가 그곳으로 하향 송신하면 됩니다.
 - Wi-Fi 가 끊긴 동안의 상향 프레임은 **버퍼링하지 않고 폐기**합니다. 지난 교통제어 패킷이 늦게 도착하는 것보다 메인보드 재전송이 안전합니다. seq 는 계속 증가하므로 서버에서 누락 구간이 보입니다.
 
@@ -136,7 +191,7 @@ bridge> reboot
 
 ```bash
 cd tools
-dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | hb | quit
+dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | cfg <agv> [cmd] | hb | quit
 ```
 
 ## 적용 전 확인·다음 단계

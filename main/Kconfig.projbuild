@@ -65,6 +65,32 @@ menu "AGV Wi-Fi Bridge"
 
     endmenu
 
+    menu "Wireless setup (SoftAP web page)"
+
+        config BR_SETUP_AP_PASS
+            string "Setup AP password (8-63 chars, empty = open)"
+            default "agvsetup"
+            help
+                설정 AP(SSID: AGVBR-<호기>-<MAC 끝 4자리>) 접속 비밀번호. 현장에 맞게 바꾸세요.
+
+        config BR_SETUP_AP_TIMEOUT_S
+            int "Close setup AP after N s without clients (only while Wi-Fi is connected)"
+            range 30 3600
+            default 300
+
+        config BR_SETUP_AP_FIRST_BOOT
+            bool "Open setup AP when no config is saved (first install)"
+            default y
+
+        config BR_SETUP_BTN_GPIO
+            int "Setup button GPIO (hold 3 s to open setup AP, -1 = none)"
+            range -1 48
+            default 0
+            help
+                기본값은 DevKitC 의 BOOT 버튼(GPIO0). 내부 풀업, 누르면 LOW.
+
+    endmenu
+
     menu "Hardware pins"
 
         config BR_MAIN_TX_GPIO

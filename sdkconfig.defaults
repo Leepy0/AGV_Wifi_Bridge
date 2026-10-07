@@ -25,3 +25,6 @@ CONFIG_UART_ISR_IN_IRAM=y
 
 # DHCP 재연결 단축: 제안 IP ARP 확인 생략 (현장은 고정 IP 권장)
 CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
+
+# 설정 AP 웹 페이지: 휴대폰 브라우저 요청 헤더가 512B 를 넘는 경우 대비 (v5.x 기본값 보완)
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

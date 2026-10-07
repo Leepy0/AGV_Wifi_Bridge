@@ -20,6 +20,8 @@ typedef enum {
     BR_T_PONG      = 0x21, // ESP → 서버, PING 의 seq/payload 그대로 반송
     BR_T_OTA_START = 0x30, // 서버 → ESP, payload = 펌웨어 URL (ASCII, http://서버/파일.bin)
     BR_T_OTA_RESULT= 0x31, // ESP → 서버, JSON: stage(start/progress/done/fail/busy), pct, err
+    BR_T_CFG_CMD   = 0x40, // 서버 → ESP, payload = 설정 명령 한 줄 (ASCII, 예: "set ip 192.168.10.107")
+    BR_T_CFG_RESULT= 0x41, // ESP → 서버, 명령 결과 텍스트 (seq = 요청 seq)
 } br_type_t;
 
 typedef struct {

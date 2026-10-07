@@ -15,6 +15,7 @@ typedef struct {
 
 esp_err_t net_bridge_start(void);
 bool      net_is_up(void);
+void      net_sta_hold(bool hold);   // true = STA 재접속 보류 (설정 AP 에 단말 접속 중 채널 유지용)
 
 bool net_send_main(const uint8_t *data, size_t len);   // 메인보드 프레임 → 서버
 bool net_send_rfid(const uint8_t *data, size_t len);   // RFID 프레임 → rfid_dst (브로드캐스트/서버)
