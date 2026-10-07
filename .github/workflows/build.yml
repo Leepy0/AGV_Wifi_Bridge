@@ -47,7 +47,7 @@ jobs:
                   build/agv_wifi_bridge.bin \
                   build/flash_args "$OUT/"
           sudo cp build/merged-binary.bin "$OUT/agv_wifi_bridge_merged.bin"
-          cp tools/flash.bat tools/flash.sh "$OUT/"
+          cp tools/flash.bat tools/flash.sh docs/FLASH_GUIDE.md "$OUT/"
           sudo chown -R "$USER" dist
           cat > "$OUT/README.txt" <<TXT
           AGV Wi-Fi Bridge ${{ steps.ver.outputs.ver }} (ESP32-S3, ESP-IDF v6.1)
@@ -56,6 +56,12 @@ jobs:
             flash.bat COM5              (Windows, esptool 자동 탐색)
             ./flash.sh /dev/ttyUSB0     (Linux/macOS)
             = esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0x0 agv_wifi_bridge_merged.bin
+            ※ 전체 이미지는 저장된 호기 설정을 지움. 설정 유지하고 다시 굽기:
+              esptool --chip esp32s3 -p COM5 write_flash 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin
+
+          [호기 설정]
+            처음 부팅 시 설정 AP(AGVBR-xx-xxxx, 비밀번호 agvsetup) 자동 열림 → 휴대폰으로 http://192.168.4.1
+            또는 USB 콘솔(115200) set/save/reboot, 서버 원격 cfg 명령. 자세한 절차: FLASH_GUIDE.md
 
           [OTA — 서버에서 무선 업데이트]
             agv_wifi_bridge.bin 만 HTTP 로 서비스하고 OTA_START 패킷으로 URL 전달
