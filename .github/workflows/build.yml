@@ -61,7 +61,7 @@ jobs:
               esptool --chip esp32s3 -p COM5 write_flash 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin
 
           [호기 설정]
-            처음 부팅 시 설정 AP(AGVBR-xx-xxxx, 비밀번호 agvsetup) 자동 열림 → 휴대폰으로 http://192.168.4.1
+            처음 부팅 시 무선 설정 모드(BLE) 자동 열림 → 휴대폰 BLE 터미널 앱으로 AGVBR-xx-xxxx 연결, login agvsetup
             또는 USB 콘솔(115200) set/save/reboot, 서버 원격 cfg 명령. 자세한 절차: FLASH_GUIDE.md
 
           [OTA — 서버에서 무선 업데이트]

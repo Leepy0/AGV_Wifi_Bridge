@@ -8,7 +8,7 @@
 #include "uart_bridge.h"
 #include "net_bridge.h"
 #include "ota.h"
-#include "setup_ap.h"
+#include "setup.h"
 #include "esp_app_desc.h"
 #include "console_cmd.h"
 
@@ -76,10 +76,10 @@ static void print_uart(const char *name, const uart_stat_t *s)
 
 static int cmd_stat(int argc, char **argv)
 {
-    char ap[96];
+    char su[128];
     net_print_status();
-    setup_ap_format(ap, sizeof(ap));
-    fputs(ap, stdout);
+    setup_format(su, sizeof(su));
+    fputs(su, stdout);
     print_uart("main", uart_bridge_stat(PORT_MAIN));
     print_uart("rfid", uart_bridge_stat(PORT_RFID));
     printf("heap: %lu\n", (unsigned long)esp_get_free_heap_size());
@@ -106,15 +106,15 @@ static int cmd_ota(int argc, char **argv)
     return 0;
 }
 
-// setup        : 무선 설정 AP 상태
-// setup on|off : 설정 AP 열기/닫기 (휴대폰으로 AP 접속 → http://192.168.4.1)
+// setup        : 무선 설정 모드 상태
+// setup on|off : 설정 모드 열기/닫기 (휴대폰 BLE 터미널 앱으로 접속)
 static int cmd_setup(int argc, char **argv)
 {
-    char buf[96];
+    char buf[128];
     if (argc == 2) {
-        setup_ap_request(strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0);
+        setup_request(strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0);
     }
-    setup_ap_format(buf, sizeof(buf));
+    setup_format(buf, sizeof(buf));
     fputs(buf, stdout);
     return 0;
 }
@@ -158,7 +158,7 @@ void console_start(void)
         { .command = "stat",     .help = "wifi / network / uart counters",      .func = cmd_stat },
         { .command = "mon",      .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
-        { .command = "setup",    .help = "setup [on|off] : wireless setup AP (http://192.168.4.1)", .func = cmd_setup },
+        { .command = "setup",    .help = "setup [on|off] : wireless setup mode (phone BLE)", .func = cmd_setup },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_console_cmd_register(&cmds[i]));

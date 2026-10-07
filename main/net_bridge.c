@@ -19,7 +19,8 @@
 #include "uart_bridge.h"
 #include "net_bridge.h"
 #include "ota.h"
-#include "setup_ap.h"
+#include "setup.h"
+#include "cmd.h"
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define BR_WIFI_BW20 WIFI_BW20
@@ -199,7 +200,7 @@ static esp_err_t wifi_init(void)
     wc.sta.ft_enabled  = 1;                           // 802.11r (빠른 재인증)
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "storage");  // 설정은 앱 NVS 로만 관리
-    setup_ap_prepare();     // 무선 설정 AP 의 SSID/암호 등록 (평소에는 STA 전용, 필요할 때만 APSTA)
+    setup_prepare_wifi();   // 설정 모드 이름 결정, SoftAP 사용 시 AP 설정 등록 (평소에는 STA 전용)
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wc), TAG, "config");
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_country_code("KR", true));   // 채널 1~13
@@ -240,59 +241,20 @@ static esp_err_t sock_init(void)
     return ESP_OK;
 }
 
-// 서버 원격 설정 — 콘솔과 같은 키 (cfg | set <key> <value> | save | reboot | setup [on|off])
-// save 는 확인 대기로 저장: 재부팅 후 서버 통신이 없으면 이전 설정으로 자동 복구 (잘못된 SSID/IP 로 연결이 끊기는 것 방지)
+// 서버 원격 설정 — 콘솔과 같은 명령 (cmd.c). save 는 확인 대기로 저장:
+// 재부팅 후 서버 통신이 없으면 이전 설정으로 자동 복구 (잘못된 SSID/IP 로 연결이 끊기는 것 방지)
 static void handle_cfg_cmd(const struct sockaddr_in *src, uint16_t seq, const uint8_t *pl, size_t len)
 {
     static char line[CMD_LINE_MAX];     // net_rx 태스크 전용
     static char out[BR_PAYLOAD_MAX];
     size_t n = len < sizeof(line) - 1 ? len : sizeof(line) - 1;
-    bool reboot = false;
-    size_t m;
+    cmd_act_t act;
 
     memcpy(line, pl, n);
     line[n] = '\0';
-    line[strcspn(line, "\r\n")] = '\0';
-    for (n = strlen(line); n > 0 && line[n - 1] == ' '; n--) {
-        line[n - 1] = '\0';
-    }
-
-    char *rest = NULL;
-    char *cmd  = strtok_r(line, " ", &rest);
-    if (cmd == NULL || strcmp(cmd, "cfg") == 0) {
-        m = cfg_format(out, sizeof(out));
-    } else if (strcmp(cmd, "set") == 0) {
-        char *key = strtok_r(NULL, " ", &rest);
-        char *val = rest ? rest + strspn(rest, " ") : NULL;    // 값은 줄 끝까지 (공백 있는 SSID 허용)
-        if (key == NULL || val == NULL || *val == '\0') {
-            m = snprintf(out, sizeof(out), "usage: set <key> <value>\n");
-        } else if (cfg_set(key, val)) {
-            m = snprintf(out, sizeof(out), "ok %s - 'save' then 'reboot' to apply\n", key);
-        } else {
-            m = snprintf(out, sizeof(out), "invalid key or value: %s\n", key);
-        }
-    } else if (strcmp(cmd, "save") == 0) {
-        esp_err_t err = cfg_save(true);
-        m = err == ESP_OK
-            ? snprintf(out, sizeof(out), "saved - 'reboot' to apply (reverts if no server contact after reboot)\n")
-            : snprintf(out, sizeof(out), "save failed: %s\n", esp_err_to_name(err));
-    } else if (strcmp(cmd, "reboot") == 0) {
-        m = snprintf(out, sizeof(out), "rebooting\n");
-        reboot = true;
-    } else if (strcmp(cmd, "setup") == 0) {
-        char *arg = strtok_r(NULL, " ", &rest);
-        if (arg) {
-            setup_ap_request(strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0);
-        }
-        m = setup_ap_format(out, sizeof(out));
-    } else {
-        m = snprintf(out, sizeof(out), "unknown command - cfg | set <key> <value> | save | reboot | setup [on|off]\n");
-    }
-    if (m >= sizeof(out)) {
-        m = sizeof(out) - 1;
-    }
+    size_t m = cmd_exec(line, CMD_SRC_SERVER, out, sizeof(out), &act);
     send_pkt(src->sin_addr.s_addr, ntohs(src->sin_port), BR_T_CFG_RESULT, seq, (const uint8_t *)out, m);
-    if (reboot) {
+    if (act == CMD_ACT_REBOOT) {
         vTaskDelay(pdMS_TO_TICKS(300));     // 결과 패킷 송신 여유
         esp_restart();
     }
@@ -393,12 +355,12 @@ static void hb_task(void *arg)
         int n = snprintf(js, sizeof(js),
                          "{\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
                          "\"disc\":%lu,\"reason\":%u,\"m_rx\":%lu,\"m_tx\":%lu,\"r_rx\":%lu,"
-                         "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu,\"cfg\":\"%s\",\"ap\":%d}",
+                         "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu,\"cfg\":\"%s\",\"setup\":%d}",
                          fw, part, ota_state_str(), (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
                          (unsigned long)s_st.disconnects, s_st.last_reason,
                          (unsigned long)m->rx_frames, (unsigned long)m->tx_frames, (unsigned long)r->rx_frames,
                          u_err, (unsigned long)s_st.tx_offline, (unsigned long)s_st.tx_err,
-                         (unsigned long)esp_get_free_heap_size(), cfg_state_str(), setup_ap_active());
+                         (unsigned long)esp_get_free_heap_size(), cfg_state_str(), setup_active());
         if (n > 0 && (size_t)n < sizeof(js)) {
             send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_STATUS, s_seq_status++, (const uint8_t *)js, (size_t)n);
         }
@@ -424,22 +386,34 @@ esp_err_t net_bridge_start(void)
     return ESP_OK;
 }
 
-void net_print_status(void)
+size_t net_format_status(char *buf, size_t cap)
 {
     esp_netif_ip_info_t ip = {0};
     wifi_ap_record_t ap = {0};
     bool up = net_is_up();
 
+    if (cap == 0) {
+        return 0;
+    }
     if (s_netif) {
         esp_netif_get_ip_info(s_netif, &ip);
     }
     if (up) {
         esp_wifi_sta_get_ap_info(&ap);
     }
-    printf("wifi: %s ip=" IPSTR " rssi=%d ch=%u bssid=" MACSTR "\n",
-           up ? "UP" : "DOWN", IP2STR(&ip.ip), ap.rssi, ap.primary, MAC2STR(ap.bssid));
-    printf("net : tx=%lu tx_err=%lu tx_offline=%lu rx=%lu rx_bad=%lu rx_foreign=%lu disc=%lu last_reason=%u\n",
-           (unsigned long)s_st.tx_pkts, (unsigned long)s_st.tx_err, (unsigned long)s_st.tx_offline,
-           (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
-           (unsigned long)s_st.disconnects, s_st.last_reason);
+    int n = snprintf(buf, cap,
+                     "wifi: %s ip=" IPSTR " rssi=%d ch=%u bssid=" MACSTR "\n"
+                     "net : tx=%lu tx_err=%lu tx_offline=%lu rx=%lu rx_bad=%lu rx_foreign=%lu disc=%lu last_reason=%u\n",
+                     up ? "UP" : "DOWN", IP2STR(&ip.ip), ap.rssi, ap.primary, MAC2STR(ap.bssid),
+                     (unsigned long)s_st.tx_pkts, (unsigned long)s_st.tx_err, (unsigned long)s_st.tx_offline,
+                     (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
+                     (unsigned long)s_st.disconnects, s_st.last_reason);
+    return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
+}
+
+void net_print_status(void)
+{
+    char buf[256];
+    net_format_status(buf, sizeof(buf));
+    fputs(buf, stdout);
 }

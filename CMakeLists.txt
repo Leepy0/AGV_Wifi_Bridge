@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 # 버전: CI 에서 -DPROJECT_VER=... 로 덮어씀 (태그 또는 커밋 해시 포함)
 if(NOT DEFINED PROJECT_VER)
-    set(PROJECT_VER "0.3.0")
+    set(PROJECT_VER "0.4.0")
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

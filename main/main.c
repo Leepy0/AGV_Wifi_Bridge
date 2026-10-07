@@ -10,7 +10,7 @@
 #include "net_bridge.h"
 #include "console_cmd.h"
 #include "ota.h"
-#include "setup_ap.h"
+#include "setup.h"
 
 static const char *TAG = "main";
 
@@ -54,10 +54,10 @@ void app_main(void)
     err = net_bridge_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "network start failed: %s (RFID bypass still active)", esp_err_to_name(err));
-    } else if (setup_ap_init() == ESP_OK) {
-#if CONFIG_BR_SETUP_AP_FIRST_BOOT
+    } else if (setup_init() == ESP_OK) {
+#if CONFIG_BR_SETUP_FIRST_BOOT
         if (!cfg_is_saved()) {
-            setup_ap_request(true);     // 저장된 설정 없음 = 처음 설치 → 휴대폰으로 설정
+            setup_request(true);        // 저장된 설정 없음 = 처음 설치 → 휴대폰으로 설정
         }
 #endif
     }
