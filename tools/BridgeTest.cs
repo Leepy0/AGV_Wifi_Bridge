@@ -1,9 +1,10 @@
 // AGV Wi-Fi 브리지 벤치 테스트용 UDP 서버 (.NET 10 file-based app)
 // 실행: dotnet run BridgeTest.cs
-// 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | hb | quit
+// 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | cfg <agv> [명령] | hb | quit
 //   data 표기: <STX> <ETX> <CR> <LF> \xHH 사용 가능 (공백 유지)
 //   예) send 7 <STX>W1107C001X<ETX>
 //   ota 7 build\agv_wifi_bridge.bin  → 이 PC 가 HTTP(8070) 로 파일을 서비스하고 ESP 에 URL 전달
+//   cfg 7 set ip 192.168.10.107       → 원격 설정 (콘솔과 같은 키). cfg 7 = 현재 설정, cfg 7 save / cfg 7 reboot
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -27,7 +28,7 @@ var rxMain = RxLoop(mainSock, cts.Token);
 var rxRfid = RxLoop(rfidSock, cts.Token);
 
 Log($"listening udp {MainPort} (main/status/pong), {RfidPort} (rfid)");
-Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | hb | quit");
+Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | hb | quit");
 
 while (Console.ReadLine() is { } line)
 {
@@ -99,6 +100,16 @@ while (Console.ReadLine() is { } line)
             break;
         }
 
+        case "cfg" when p.Length >= 2 && TryGetAgv(p[1], out var ag):
+        {
+            // cfg | set <key> <value> | save | reboot | setup [on|off]
+            var cmd = p.Length == 3 ? p[2] : "cfg";
+            var pkt = Proto.Build(Proto.CfgCmd, ag.Id, ag.NextDownSeq(), Encoding.UTF8.GetBytes(cmd));
+            mainSock.Send(pkt, pkt.Length, ag.Ep);
+            Log($"[{ag.Id:D2}] CFG< {cmd}");
+            break;
+        }
+
         default:
             Log("unknown command or AGV not seen yet");
             break;
@@ -146,6 +157,10 @@ void Handle(byte[] b, IPEndPoint ep)
         }
         case Proto.OtaResult:
             Log($"[{h.Agv:D2}] OTA  {Encoding.ASCII.GetString(pl)}");
+            break;
+        case Proto.CfgResult:
+            foreach (var l in Encoding.UTF8.GetString(pl).TrimEnd('\n').Split('\n'))
+                Log($"[{h.Agv:D2}] CFG> {l}");
             break;
         case Proto.Pong when pl.Length == 8:
         {
@@ -279,7 +294,7 @@ static class FwServer
 static class Proto
 {
     public const byte MainUp = 0x01, MainDown = 0x02, Rfid = 0x03, Status = 0x10, Ping = 0x20, Pong = 0x21,
-                      OtaStart = 0x30, OtaResult = 0x31;
+                      OtaStart = 0x30, OtaResult = 0x31, CfgCmd = 0x40, CfgResult = 0x41;
     const byte Magic0 = 0xA5, Magic1 = 0x5A, Ver = 1;
     const int HdrLen = 10;
 
