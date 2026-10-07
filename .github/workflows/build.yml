@@ -44,8 +44,9 @@ jobs:
           sudo cp build/bootloader/bootloader.bin \
                   build/partition_table/partition-table.bin \
                   build/ota_data_initial.bin \
-                  build/agv_wifi_bridge.bin \
-                  build/flash_args "$OUT/"
+                  build/agv_wifi_bridge.bin "$OUT/"
+          # flash_args 의 경로(bootloader/…, partition_table/…)를 zip 의 평평한 구조에 맞춤 → write_flash @flash_args 가능
+          sudo sed 's#[^ ]*/##' build/flash_args > "$OUT/flash_args"
           sudo cp build/merged-binary.bin "$OUT/agv_wifi_bridge_merged.bin"
           cp tools/flash.bat tools/flash.sh docs/FLASH_GUIDE.md "$OUT/"
           sudo chown -R "$USER" dist
