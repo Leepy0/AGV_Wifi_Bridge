@@ -27,6 +27,10 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
    Arduino IDE 자체로는 미리 빌드한 .bin 을 올릴 수 없으니(스케치 컴파일 전용) 이 스크립트나 Espressif Flash Download Tool 을 씁니다.
 3. 처음 한 번만 USB 로 굽고, 이후 버전은 OTA 로 올립니다 (아래).
 
+> 전체 이미지(merged.bin)는 저장된 설정(NVS)까지 덮어씁니다. 설정한 호기를 USB 로 다시 구울 때는 `write_flash 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin` 으로 앱만 굽습니다.
+
+**포트 확인·연결 실패 대처·호기 설정·동작 확인까지 단계별 절차는 [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md)** (zip 에도 포함)를 보세요.
+
 zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridge.bin`(OTA 용 앱만), bootloader / partition-table / ota_data 개별 파일, `flash_args`.
 
 ## 개발 환경
