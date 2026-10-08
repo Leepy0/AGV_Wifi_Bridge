@@ -193,13 +193,34 @@ cfg 7 reboot
 | `0x21` PONG | ESP → 서버 | PING 의 seq·payload 그대로 |
 | `0x30` OTA_START | 서버 → ESP | 펌웨어 URL (ASCII, AGV ID 일치 시만) |
 | `0x31` OTA_RESULT | ESP → 서버 | JSON: stage(start/progress/done/fail/busy), pct, err |
+| `0x11` INFO_REQ | 서버 → ESP | 없음 — 장치 정보 요청 |
+| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw, part, ota, cfg, setup, up, dsp, dspb, dsp_build, dsp_st, staged |
+| `0x32` DSP_OTA_START | 서버 → ESP | JSON: url, ver, crc32, size, job, apply — 메인보드 이미지(.dspfw) 스테이징 (AGV ID 일치 시만) |
+| `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage(download/staged/start/enter/erase/progress/verify/done/fail), pct, ver, err |
+| `0x34` DSP_OTA_APPLY | 서버 → ESP | JSON: job — 스테이징된 이미지를 메인보드에 적용 (AGV ID 일치 시만) |
 | `0x40` CFG_CMD | 서버 → ESP | 설정 명령 한 줄 (텍스트, AGV ID 일치 시만) |
 | `0x41` CFG_RESULT | ESP → 서버 | 명령 결과 텍스트 (seq = 요청 seq) |
 
 - 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어와 원격 변경 설정이 확정(롤백 취소)됩니다.
-- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `setup`(무선 설정 모드 1/0) 가 포함됩니다.
+- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `setup`(무선 설정 모드 1/0), `dsp`/`dspb`/`dsp_build`(메인보드 앱·부트로더 버전·빌드일), `dsp_st`(idle/downloading/staged/programming), `staged`(대기 중 이미지 {job, ver} 또는 null) 가 포함됩니다.
 - 서버는 ESP 가 보낸 패킷의 송신 endpoint(IP:50000)를 기억했다가 그곳으로 하향 송신하면 됩니다.
 - Wi-Fi 가 끊긴 동안의 상향 프레임은 **버퍼링하지 않고 폐기**합니다. 지난 교통제어 패킷이 늦게 도착하는 것보다 메인보드 재전송이 안전합니다. seq 는 계속 증가하므로 서버에서 누락 구간이 보입니다.
+
+## 메인보드(TMS320F2808) 펌웨어 OTA
+
+메인보드에 상주 부트로더(플래시 섹터 A)를 넣고, 브리지가 서버에서 받은 이미지를 UART 로 프로그래밍합니다. 설계·규격은 [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md), 부트로더·앱 수정·CCS 설정은 [dsp/README.md](dsp/README.md).
+
+```
+dspota 7 stage app_1.2.3.dspfw        # (BridgeTest) 스테이징 — 주행 중에도 가능, 브리지가 dspfw 파티션에 보관
+dspota 7 apply                        # 정지 상태에서 적용: 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
+info 7                                # 메인보드 앱/부트로더 버전, 스테이징 상태
+```
+
+- 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
+- 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 `apply` 하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
+- 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다.
+- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply`.
+- **파티션 변경**: 0.5.0 부터 OTA 슬롯 1.75MB + `dspfw` 384KB. 이전 버전 브리지는 USB 로 한 번 전체를 다시 구워야 합니다.
 
 ## 벤치 테스트 순서
 

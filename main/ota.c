@@ -12,6 +12,7 @@
 #include "esp_https_ota.h"
 #include "esp_http_client.h"
 #include "net_bridge.h"
+#include "dsp_ota.h"
 #include "ota.h"
 
 static const char *TAG = "ota";
@@ -163,7 +164,7 @@ esp_err_t ota_start(const char *url)
     if (n < 8 || n >= URL_MAX || strncmp(url, "http", 4) != 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_busy) {
+    if (s_busy || dsp_ota_busy()) {
         report("{\"stage\":\"busy\"}");
         return ESP_ERR_INVALID_STATE;
     }

@@ -28,3 +28,10 @@ esp_err_t uart_bridge_start(frame_cb_t on_main, frame_cb_t on_rfid);
 bool uart_bridge_send_main(const uint8_t *data, size_t len);
 
 const uart_stat_t *uart_bridge_stat(port_id_t port);
+
+// 메인보드 UART 독점(원시 모드): 프레임 처리·RFID 바이패스·서버 하향을 멈추고 바이트 단위로 직접 읽고 씀 (DSP 프로그래밍용)
+esp_err_t uart_bridge_raw_begin(void);
+void      uart_bridge_raw_end(void);
+int       uart_bridge_raw_read(uint8_t *buf, size_t n, uint32_t timeout_ms);   // 읽은 바이트 수
+void      uart_bridge_raw_write(const uint8_t *buf, size_t n);
+bool      uart_bridge_raw_active(void);

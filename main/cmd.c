@@ -5,6 +5,7 @@
 #include "net_bridge.h"
 #include "ota.h"
 #include "setup.h"
+#include "dsp_ota.h"
 #include "cmd.h"
 
 static size_t clamp(int n, size_t cap)
@@ -67,6 +68,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
                            ota_running_partition(), ota_state_str(), cfg_state_str()), cap);
         n += net_format_status(out + n, cap - n);
         n += setup_format(out + n, cap - n);
+        n += dsp_ota_format(out + n, cap - n);
         return n;
     }
     if (strcmp(cmd, "setup") == 0) {
@@ -76,8 +78,21 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         }
         return setup_format(out, cap);
     }
+    if (strcmp(cmd, "dsp") == 0) {
+        // dsp | dsp ver | dsp apply   (스테이징은 서버 패킷으로만)
+        char *arg = strtok_r(NULL, " ", &rest);
+        if (arg && strcmp(arg, "ver") == 0) {
+            dsp_ota_query_version();
+            return clamp(snprintf(out, cap, "version query sent - 'dsp' to see\n"), cap);
+        }
+        if (arg && strcmp(arg, "apply") == 0) {
+            dsp_ota_apply("{}", 2);
+            return clamp(snprintf(out, cap, "apply requested - progress goes to server (DSP_OTA_RESULT)\n"), cap);
+        }
+        return dsp_ota_format(out, cap);
+    }
     if (strcmp(cmd, "help") == 0) {
-        return clamp(snprintf(out, cap, "cfg | set <key> <value> | save | reboot | stat | setup [on|off]%s\n",
+        return clamp(snprintf(out, cap, "cfg | set <key> <value> | save | reboot | stat | setup [on|off] | dsp [ver|apply]%s\n",
                               src == CMD_SRC_LOCAL ? " | defaults" : ""), cap);
     }
     return clamp(snprintf(out, cap, "unknown command '%s' - type help\n", cmd), cap);

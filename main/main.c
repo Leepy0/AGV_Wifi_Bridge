@@ -11,12 +11,16 @@
 #include "console_cmd.h"
 #include "ota.h"
 #include "setup.h"
+#include "dsp_ota.h"
 
 static const char *TAG = "main";
 
 // 메인보드(J4) 수신 프레임 → 서버
 static void on_main_frame(const uint8_t *data, size_t len)
 {
+    if (dsp_ota_observe(data, len)) {   // 브리지 앞 R 응답은 서버로 올리지 않음 (PAN ID 학습도 여기서)
+        return;
+    }
     net_send_main(data, len);
     if (g_monitor) {    // 벤치 확인용 — 전달 후 출력해 지연에 영향 없게
         ESP_LOG_BUFFER_HEXDUMP("MAIN>", data, len, ESP_LOG_INFO);
@@ -54,12 +58,18 @@ void app_main(void)
     err = net_bridge_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "network start failed: %s (RFID bypass still active)", esp_err_to_name(err));
-    } else if (setup_init() == ESP_OK) {
-#if CONFIG_BR_SETUP_FIRST_BOOT
-        if (!cfg_is_saved()) {
-            setup_request(true);        // 저장된 설정 없음 = 처음 설치 → 휴대폰으로 설정
+    } else {
+        esp_err_t e = dsp_ota_init();   // 메인보드 OTA: 스테이징 파티션 확인, 버전 조회 태스크
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "dsp ota init failed: %s", esp_err_to_name(e));
         }
+        if (setup_init() == ESP_OK) {
+#if CONFIG_BR_SETUP_FIRST_BOOT
+            if (!cfg_is_saved()) {
+                setup_request(true);    // 저장된 설정 없음 = 처음 설치 → 휴대폰으로 설정
+            }
 #endif
+        }
     }
 
     console_start();

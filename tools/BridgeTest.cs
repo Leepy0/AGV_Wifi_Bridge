@@ -1,10 +1,14 @@
 // AGV Wi-Fi 브리지 벤치 테스트용 UDP 서버 (.NET 10 file-based app)
 // 실행: dotnet run BridgeTest.cs
-// 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | cfg <agv> [명령] | hb | quit
+// 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | cfg <agv> [명령]
+//       | info <agv> | dspota <agv> stage <dspfw 파일|url> [apply] | dspota <agv> apply | hb | quit
 //   data 표기: <STX> <ETX> <CR> <LF> \xHH 사용 가능 (공백 유지)
 //   예) send 7 <STX>W1107C001X<ETX>
 //   ota 7 build\agv_wifi_bridge.bin  → 이 PC 가 HTTP(8070) 로 파일을 서비스하고 ESP 에 URL 전달
 //   cfg 7 set ip 192.168.10.107       → 원격 설정 (콘솔과 같은 키). cfg 7 = 현재 설정, cfg 7 save / cfg 7 reboot
+//   dspota 7 stage app.dspfw apply    → 메인보드 펌웨어: 이 PC 가 HTTP 로 파일 서비스, 브리지가 받아 두고(스테이징) 바로 적용
+//   dspota 7 apply                    → 스테이징된 이미지 적용 (AGV 정지 상태에서)
+//   info 7                            → 장치 정보 (ESP/메인보드 버전, 스테이징 상태)
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -20,6 +24,7 @@ const int HttpPort = 8070;    // OTA 펌웨어 파일 서비스용
 var agvs = new ConcurrentDictionary<byte, Agv>();
 var logLock = new object();
 var showHb = false;
+var dspJob = 0;        // 테스트용 작업 번호 (관리 서버에서는 DB 의 job id)
 
 using var mainSock = OpenUdp(MainPort);
 using var rfidSock = OpenUdp(RfidPort);
@@ -28,7 +33,7 @@ var rxMain = RxLoop(mainSock, cts.Token);
 var rxRfid = RxLoop(rfidSock, cts.Token);
 
 Log($"listening udp {MainPort} (main/status/pong), {RfidPort} (rfid)");
-Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | hb | quit");
+Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <file|url> [apply] | dspota <agv> apply | hb | quit");
 
 while (Console.ReadLine() is { } line)
 {
@@ -100,6 +105,57 @@ while (Console.ReadLine() is { } line)
             break;
         }
 
+        case "info" when p.Length == 2 && TryGetAgv(p[1], out var ag):
+        {
+            var pkt = Proto.Build(Proto.InfoReq, ag.Id, ag.NextDownSeq(), []);
+            mainSock.Send(pkt, pkt.Length, ag.Ep);
+            break;
+        }
+
+        case "dspota" when p.Length >= 3 && TryGetAgv(p[1], out var ag):
+        {
+            // dspota <agv> stage <file|url> [apply] | dspota <agv> apply
+            var sub = p[2].Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+            var job = ++dspJob;
+            string json;
+            if (sub[0] == "apply")
+            {
+                json = $"{{\"job\":{job}}}";
+                var pkt = Proto.Build(Proto.DspOtaApply, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
+                mainSock.Send(pkt, pkt.Length, ag.Ep);
+                Log($"[{ag.Id:D2}] DSP_OTA_APPLY {json}");
+            }
+            else if (sub[0] == "stage" && sub.Length >= 2)
+            {
+                string url, ver = "", extra = "";
+                var apply = sub.Length == 3 && sub[2] == "apply" ? 1 : 0;
+                if (sub[1].StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    url = sub[1];
+                }
+                else
+                {
+                    if (!File.Exists(sub[1])) { Log($"file not found: {sub[1]}"); break; }
+                    var data = File.ReadAllBytes(sub[1]);
+                    if (data.Length < 32 || Encoding.ASCII.GetString(data, 0, 7) != "AGVDSP1") { Log("not a .dspfw file"); break; }
+                    ver = Encoding.ASCII.GetString(data, 16, 16).TrimEnd('\0');
+                    var crc = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(12));   // 파일 헤더의 CRC (브리지가 대조)
+                    FwServer.Serve(data, HttpPort, Log);
+                    url = $"http://{LocalIpToward(ag.Ep!)}:{HttpPort}/fw.dspfw";
+                    extra = $",\"crc32\":{crc},\"size\":{data.Length}";
+                }
+                json = $"{{\"url\":\"{url}\",\"ver\":\"{ver}\",\"job\":{job},\"apply\":{apply}{extra}}}";
+                var pkt = Proto.Build(Proto.DspOtaStart, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
+                mainSock.Send(pkt, pkt.Length, ag.Ep);
+                Log($"[{ag.Id:D2}] DSP_OTA_START {json}");
+            }
+            else
+            {
+                Log("usage: dspota <agv> stage <file|url> [apply] | dspota <agv> apply");
+            }
+            break;
+        }
+
         case "cfg" when p.Length >= 2 && TryGetAgv(p[1], out var ag):
         {
             // cfg | set <key> <value> | save | reboot | setup [on|off]
@@ -157,6 +213,12 @@ void Handle(byte[] b, IPEndPoint ep)
         }
         case Proto.OtaResult:
             Log($"[{h.Agv:D2}] OTA  {Encoding.ASCII.GetString(pl)}");
+            break;
+        case Proto.DspOtaResult:
+            Log($"[{h.Agv:D2}] DSP  {Encoding.ASCII.GetString(pl)}");
+            break;
+        case Proto.Info:
+            Log($"[{h.Agv:D2}] INFO {Encoding.ASCII.GetString(pl)}");
             break;
         case Proto.CfgResult:
             foreach (var l in Encoding.UTF8.GetString(pl).TrimEnd('\n').Split('\n'))
@@ -294,7 +356,8 @@ static class FwServer
 static class Proto
 {
     public const byte MainUp = 0x01, MainDown = 0x02, Rfid = 0x03, Status = 0x10, Ping = 0x20, Pong = 0x21,
-                      OtaStart = 0x30, OtaResult = 0x31, CfgCmd = 0x40, CfgResult = 0x41;
+                      OtaStart = 0x30, OtaResult = 0x31, CfgCmd = 0x40, CfgResult = 0x41,
+                      InfoReq = 0x11, Info = 0x12, DspOtaStart = 0x32, DspOtaResult = 0x33, DspOtaApply = 0x34;
     const byte Magic0 = 0xA5, Magic1 = 0x5A, Ver = 1;
     const int HdrLen = 10;
 

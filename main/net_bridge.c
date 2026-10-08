@@ -21,6 +21,7 @@
 #include "ota.h"
 #include "setup.h"
 #include "cmd.h"
+#include "dsp_ota.h"
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define BR_WIFI_BW20 WIFI_BW20
@@ -43,7 +44,7 @@ static esp_netif_t *s_netif;
 static int s_sock = -1;
 static net_stat_t s_st;
 // 타입별 순번 — 각 타입은 한 태스크에서만 송신하므로 잠금 불필요 (CFG_RESULT 는 요청 seq 반송)
-static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota;
+static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota, s_seq_dsp, s_seq_info;
 static esp_timer_handle_t s_reconn_timer;
 static uint32_t s_fail_streak;          // 연속 접속 실패 횟수 (재접속 간격 조절용)
 static volatile bool s_hold;            // STA 재접속 보류 (설정 AP 사용 중)
@@ -98,6 +99,34 @@ bool net_send_rfid(const uint8_t *data, size_t len)
 bool net_send_ota_result(const uint8_t *data, size_t len)
 {
     return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_OTA_RESULT, s_seq_ota++, data, len);
+}
+
+bool net_send_dsp_result(const uint8_t *data, size_t len)
+{
+    return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_DSP_OTA_RESULT, s_seq_dsp++, data, len);
+}
+
+// 장치 정보 (관리 서버 목록용): 설정·버전·메인보드 버전·스테이징 상태
+static void send_info(const struct sockaddr_in *to)
+{
+    static char js[BR_PAYLOAD_MAX];     // net_rx 태스크 전용
+    esp_netif_ip_info_t ip = {0};
+    uint8_t mac[6] = {0};
+    esp_netif_get_ip_info(s_netif, &ip);
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    int n = snprintf(js, sizeof(js),
+                     "{\"agv\":%u,\"mac\":\"" MACSTR "\",\"ip\":\"" IPSTR "\",\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\","
+                     "\"cfg\":\"%s\",\"setup\":%d,\"up\":%lld,",
+                     g_cfg.agv_id, MAC2STR(mac), IP2STR(&ip.ip), esp_app_get_description()->version,
+                     ota_running_partition(), ota_state_str(), cfg_state_str(), setup_active(),
+                     (long long)(esp_timer_get_time() / 1000000));
+    if (n > 0 && (size_t)n < sizeof(js)) {
+        n += dsp_ota_status_json(js + n, sizeof(js) - n);
+        n += snprintf(js + n, sizeof(js) - n, "}");
+    }
+    if (n > 0 && (size_t)n < sizeof(js)) {
+        send_pkt(to->sin_addr.s_addr, ntohs(to->sin_port), BR_T_INFO, s_seq_info++, (const uint8_t *)js, (size_t)n);
+    }
 }
 
 static void reconn_timer_cb(void *arg)
@@ -326,6 +355,23 @@ static void net_rx_task(void *arg)
             }
             handle_cfg_cmd(&src, h.seq, pl, h.len);
             break;
+        case BR_T_INFO_REQ:
+            send_info(&src);
+            break;
+        case BR_T_DSP_OTA_START:
+            if (h.agv_id != g_cfg.agv_id) {
+                s_st.rx_foreign++;
+                break;
+            }
+            dsp_ota_start((const char *)pl, h.len);
+            break;
+        case BR_T_DSP_OTA_APPLY:
+            if (h.agv_id != g_cfg.agv_id) {
+                s_st.rx_foreign++;
+                break;
+            }
+            dsp_ota_apply((const char *)pl, h.len);
+            break;
         default:
             s_st.rx_bad++;
             break;
@@ -336,7 +382,7 @@ static void net_rx_task(void *arg)
 // 주기 상태 보고 (서버에서 RSSI/로밍/오류 추이 기록용)
 static void hb_task(void *arg)
 {
-    char js[400];
+    char js[560];
     const char *fw   = esp_app_get_description()->version;
     const char *part = ota_running_partition();
 
@@ -355,12 +401,16 @@ static void hb_task(void *arg)
         int n = snprintf(js, sizeof(js),
                          "{\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
                          "\"disc\":%lu,\"reason\":%u,\"m_rx\":%lu,\"m_tx\":%lu,\"r_rx\":%lu,"
-                         "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu,\"cfg\":\"%s\",\"setup\":%d}",
+                         "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu,\"cfg\":\"%s\",\"setup\":%d,",
                          fw, part, ota_state_str(), (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
                          (unsigned long)s_st.disconnects, s_st.last_reason,
                          (unsigned long)m->rx_frames, (unsigned long)m->tx_frames, (unsigned long)r->rx_frames,
                          u_err, (unsigned long)s_st.tx_offline, (unsigned long)s_st.tx_err,
                          (unsigned long)esp_get_free_heap_size(), cfg_state_str(), setup_active());
+        if (n > 0 && (size_t)n < sizeof(js)) {
+            n += dsp_ota_status_json(js + n, sizeof(js) - n);
+            n += snprintf(js + n, sizeof(js) - n, "}");
+        }
         if (n > 0 && (size_t)n < sizeof(js)) {
             send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_STATUS, s_seq_status++, (const uint8_t *)js, (size_t)n);
         }

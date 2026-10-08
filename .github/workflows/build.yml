@@ -69,12 +69,13 @@ jobs:
             (BridgeTest: ota <agv> agv_wifi_bridge.bin)
 
           [개별 오프셋]  flash_args 참조 (bootloader 0x0, partition-table 0x8000, ota_data 0xf000, app 0x20000)
+          ※ 0.5.0 부터 파티션이 바뀜(OTA 슬롯 1.75MB + dspfw). 이전 버전에서 올 때는 USB 전체 굽기 필요
           TXT
           cd dist && zip -r "agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip" "agv_wifi_bridge_${{ steps.ver.outputs.ver }}"
           ls -l
           # 앱 크기 / OTA 슬롯(0x1E0000) 사용률을 실행 요약에 표시
           APP=$(stat -c %s "agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin")
-          SLOT=$((0x1E0000))
+          SLOT=$((0x1C0000))
           {
             echo "### agv_wifi_bridge ${{ steps.ver.outputs.ver }}"
             echo "- app: $APP bytes ($((APP * 100 / SLOT))% of OTA slot $SLOT)"
