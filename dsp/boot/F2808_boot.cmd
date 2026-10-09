@@ -1,5 +1,5 @@
 /* 부트로더 링커 — 플래시 섹터 A 전용. 앱 영역(섹터 B~D)·CSM 영역은 할당하지 않는다.
-   부트플래그 0x0007FC~0x0007FF 는 RAMM1 에서 제외 (앱 링커 cmd 도 동일) */
+   부트 카운터 0x0007FA~0x0007FB 와 부트플래그 0x0007FC~0x0007FF 는 RAMM1 에서 제외 (앱 링커 cmd 도 동일) */
 MEMORY
 {
 PAGE 0:
@@ -13,7 +13,7 @@ PAGE 0:
 
 PAGE 1:
    RAMM0       : origin = 0x000000, length = 0x000400
-   RAMM1       : origin = 0x000400, length = 0x0003FC
+   RAMM1       : origin = 0x000400, length = 0x0003FA
    RAML1       : origin = 0x009000, length = 0x001000
    RAMH0       : origin = 0x3F8000, length = 0x002000
 }

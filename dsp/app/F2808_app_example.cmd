@@ -1,6 +1,6 @@
 /* 앱 링커 예시 — 기존 앱 cmd 에서 FLASH 쪽만 이렇게 바꾼다.
    앱 = 섹터 D·C·B (0x3E8000~0x3F3FFF). 섹터 A(부트로더)·BEGIN·CSM 은 할당하지 않는다.
-   부트플래그 0x0007FC~0x0007FF 는 RAMM1 에서 제외 (부트로더 cmd 와 동일) */
+   부트 카운터 0x0007FA~0x0007FB 와 부트플래그 0x0007FC~0x0007FF 는 RAMM1 에서 제외 (부트로더 cmd 와 동일) */
 MEMORY
 {
 PAGE 0:
@@ -13,7 +13,7 @@ PAGE 0:
 
 PAGE 1:
    RAMM0       : origin = 0x000000, length = 0x000400
-   RAMM1       : origin = 0x000400, length = 0x0003FC     /* 0x7FC~0x7FF 부트플래그 */
+   RAMM1       : origin = 0x000400, length = 0x0003FA     /* 0x7FA~0x7FB 부트 카운터, 0x7FC~0x7FF 부트플래그 */
    RAML1       : origin = 0x009000, length = 0x001000
    RAMH0       : origin = 0x3F8000, length = 0x002000
 }

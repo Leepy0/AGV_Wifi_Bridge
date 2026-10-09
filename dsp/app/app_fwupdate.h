@@ -4,7 +4,9 @@
 //  2) 이 파일과 app_fwupdate.c 를 프로젝트에 넣는다 (.apphdr 자리표시자 포함)
 //  3) J4 수신 프레임 처리에서 fwup_handle() 을 먼저 호출한다. 'F' 프레임이면 응답을 만들어 주므로 송신한다
 //  4) FWUP_REPLY_RESET 을 받으면 응답 송신이 끝난 뒤(TXEMPTY) fwup_reset() 을 호출한다
-//  5) 빌드 후: hex2000 -i -o app.hex app.out --memwidth=16 --romwidth=16 → tools/dsp_pack.py pack
+//  5) 초기화가 끝나 메인 루프에 들어가면 fwup_boot_ok() 를 한 번 호출한다 (부트 카운터 0).
+//     안 부르면 부트로더가 "기동 불능 앱"으로 보고 워치독 리셋 3회 뒤 업데이트 모드에 머문다
+//  6) 빌드 후: hex2000 -i -o app.hex app.out --memwidth=16 --romwidth=16 → tools/dsp_pack.py pack
 #include <stdint.h>
 
 #define FWUP_NONE           0   // F 프레임 아님 (기존 처리 계속)
@@ -20,6 +22,7 @@ typedef uint16_t (*fwup_safe_fn)(void);
 int  fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn safe,
                  char *reply, uint16_t cap, uint16_t *reply_len);
 void fwup_reset(void);                      // 부트플래그 기록 → 워치독 리셋 (돌아오지 않음)
+void fwup_boot_ok(void);                    // 정상 기동 알림: 부트 카운터 0 (메인 루프 진입 시 한 번. F 프레임 처리 때도 자동)
 const char *fwup_app_version(void);         // 앱 헤더의 버전 문자열 (패커가 기록)
 const char *fwup_boot_version(void);        // 부트로더 정보 블록의 버전 (없으면 "-")
 char fwup_bcc(const char *payload, uint16_t len);   // AGV-ACS 체크섬 (하위 니블 ASCII-HEX)

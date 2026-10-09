@@ -182,6 +182,11 @@ static void main_tx_task(void *arg)
         if (xQueueReceive(s_main_txq, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        if (s_raw) {
+            // raw_begin() 의 큐 비우기와 경쟁해 남은 프레임: 부트로더 패킷 사이에 끼우지 않는다
+            p->st.tx_drop++;
+            continue;
+        }
         uart_write_bytes(p->uart, item.data, item.len);
         p->st.tx_frames++;
         p->st.tx_bytes += item.len;

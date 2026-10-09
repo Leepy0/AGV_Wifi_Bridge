@@ -103,10 +103,11 @@ def parse_intel_hex(path: str) -> dict:
                 raise ValueError(f"{path}:{ln}: 지원하지 않는 레코드 타입 {typ:#x}")
     if not mem:
         raise ValueError("데이터가 없음")
-    # 바이트 주소로 나온 경우(0x7D0000 대) → 워드 주소
+    # 바이트 주소 HEX(--romwidth=8 등, 0x7D0000 대)는 받지 않는다: 워드 재조립과 바이트 순서를 추측하면
+    # CRC 는 맞는데 내용이 틀린 이미지가 만들어져 기동 불능 앱이 올라갈 수 있다
     lo, hi = min(mem), max(mem)
     if lo >= APP_HDR_ADDR * 2 and hi < 0x800000:
-        mem = {a // 2: v for a, v in mem.items()}
+        raise ValueError(f"바이트 주소 HEX (0x{lo:06X}~0x{hi:06X}) — hex2000 에 --memwidth=16 --romwidth=16 을 주어 워드 주소로 뽑으세요")
     return mem
 
 
@@ -244,6 +245,27 @@ def cmd_selftest(a):
     print(f"crc16_words(12345678)  = {crc16_words(words):04X}")
     hdr = build_header(0x1234, 0xDEADBEEF, 1700000000, "1.2.3")
     print(f"hdr[62] (hdr_crc16)    = {hdr[62]:04X}")
+    # Intel HEX 파서: 워드 주소(--memwidth=16 --romwidth=16) 는 그대로, 바이트 주소는 거부
+    import tempfile, os
+    def rec(addr, data):
+        b = bytes([len(data), addr >> 8, addr & 0xFF, 0]) + data
+        return ":" + (b + bytes([(-sum(b)) & 0xFF])).hex().upper()
+    ext = lambda hi: ":02000004" + f"{hi:04X}" + f"{(-(2 + 4 + (hi >> 8) + (hi & 0xFF))) & 0xFF:02X}"
+    with tempfile.TemporaryDirectory() as d:
+        wp = os.path.join(d, "w.hex")
+        with open(wp, "w") as f:
+            f.write(ext(0x003E) + "\n" + rec(0x8040, bytes([0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44])) + "\n:00000001FF\n")
+        m = parse_intel_hex(wp)
+        assert m == {0x3E8040: 0x1111, 0x3E8041: 0x2222, 0x3E8042: 0x3333, 0x3E8043: 0x4444}, m
+        bp = os.path.join(d, "b.hex")
+        with open(bp, "w") as f:
+            f.write(ext(0x007D) + "\n" + rec(0x0080, bytes([0x11, 0x11, 0x22, 0x22])) + "\n:00000001FF\n")
+        try:
+            parse_intel_hex(bp)
+            raise AssertionError("바이트 주소 HEX 를 거부해야 함")
+        except ValueError as e:
+            assert "바이트 주소" in str(e), e
+    print("intel hex parse ok (word addresses accepted, byte addresses rejected)")
     print("selftest ok")
 
 

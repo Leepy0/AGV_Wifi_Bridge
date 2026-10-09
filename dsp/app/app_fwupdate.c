@@ -105,6 +105,7 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
     if ((uint16_t)(payload[3] - '0') * 10 + (uint16_t)(payload[4] - '0') != agv_id) {
         return FWUP_NONE;               // 다른 호기
     }
+    fwup_boot_ok();                     // 프레임을 처리할 수 있으면 앱은 살아 있다 (명시 호출을 잊은 경우의 보조)
 
     switch (payload[5]) {
     case 'V': {
@@ -156,6 +157,13 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
     reply[n++] = ETX;
     *reply_len = n;
     return result;
+}
+
+void fwup_boot_ok(void)
+{
+    volatile uint16_t *c = (volatile uint16_t *)DSPIMG_BOOTCNT_ADDR;
+    c[0] = DSPIMG_BOOTCNT_MAGIC;
+    c[1] = 0;
 }
 
 void fwup_reset(void)

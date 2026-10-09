@@ -200,6 +200,17 @@ static uint16_t handle(bp_ctx_t *c, uint16_t cmd, const uint16_t *pl, uint16_t n
     }
 }
 
+int bp_rx_busy(const bp_ctx_t *c)
+{
+    return c->state != S_SOF0;
+}
+
+void bp_rx_reset(bp_ctx_t *c)
+{
+    c->state = S_SOF0;
+    c->idx = 0;
+}
+
 int bp_rx_byte(bp_ctx_t *c, uint16_t b)
 {
     b &= 0xFFU;

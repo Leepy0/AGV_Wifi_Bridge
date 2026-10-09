@@ -36,10 +36,32 @@ static int take_bootflag(void)
     return set;
 }
 
+// 앱 기동 실패 횟수 — CRC 는 맞지만 기동 직후 죽는 앱(링커·클럭 실수 등)이 올라가도 OTA 로 다시 고칠 수 있게
+static uint16_t bootcnt_bump(void)
+{
+    volatile uint16_t *c = (volatile uint16_t *)DSPIMG_BOOTCNT_ADDR;
+    uint16_t n = c[0] == DSPIMG_BOOTCNT_MAGIC ? c[1] : 0;   // 전원 투입 직후 쓰레기 값은 0
+    if (n < 0xFFFF) {
+        n++;
+    }
+    c[0] = DSPIMG_BOOTCNT_MAGIC;
+    c[1] = n;
+    return n;
+}
+
+static void bootcnt_clear(void)
+{
+    volatile uint16_t *c = (volatile uint16_t *)DSPIMG_BOOTCNT_ADDR;
+    c[0] = DSPIMG_BOOTCNT_MAGIC;
+    c[1] = 0;
+}
+
 static void update_mode(void)
 {
     uint16_t wraps = 0;
     const uint16_t idle_wraps = (uint16_t)((uint32_t)IDLE_TIMEOUT_S * (SYSCLK_HZ / 1000UL) / 4294967UL) + 1;   // 랩 ≈ 2^32 / SYSCLK 초
+    const uint32_t gap_ticks = (uint32_t)RX_GAP_MS * (SYSCLK_HZ / 1000UL);
+    uint32_t last_rx = 0;
 
     hw_sci_init();
     hw_timer_start();
@@ -47,10 +69,12 @@ static void update_mode(void)
     for (;;) {
         int b = hw_sci_getc();
         if (b >= 0) {
-            wraps = 0;
-            hw_timer_start();
+            last_rx = hw_timer_now();
             if (bp_rx_byte(&s_bp, (uint16_t)b)) {
                 uint16_t i;
+                // 유효한 패킷만 유휴 시계를 되돌린다 — 앱용 ASCII 프레임(V 조회·ACS·RFID)이나 노이즈는 아님
+                wraps = 0;
+                hw_timer_start();
                 for (i = 0; i < s_bp.tx_len; i++) {
                     hw_sci_putc(s_bp.tx[i]);
                 }
@@ -60,6 +84,9 @@ static void update_mode(void)
                 }
             }
             continue;
+        }
+        if (bp_rx_busy(&s_bp) && (uint32_t)(last_rx - hw_timer_now()) > gap_ticks) {
+            bp_rx_reset(&s_bp);     // 잘린 패킷(브리지 재부팅·전원 흔들림) 뒤 재동기
         }
         if (hw_timer_wrapped() && ++wraps >= idle_wraps) {
             // 브리지가 사라짐 — 앱이 유효하면 복귀, 아니면 계속 대기
@@ -82,6 +109,11 @@ void main(void)
         update_mode();
     }
     if (bp_app_check(&OPS, 0, 0) == DSPIMG_OK) {
+        if (bootcnt_bump() > DSPIMG_BOOTCNT_MAX) {
+            // 앱이 fwup_boot_ok() 를 부르지 못한 채 연속 리셋 → 기동 불능 앱으로 보고 새 이미지를 기다린다
+            bootcnt_clear();
+            update_mode();
+        }
         hw_jump_app();
     }
     update_mode();
