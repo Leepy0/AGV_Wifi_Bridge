@@ -1,3 +1,7 @@
+#include "sdkconfig.h"
+
+#if CONFIG_BR_SETUP_SOFTAP
+
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -16,16 +20,15 @@
 #include "esp_app_desc.h"
 #include "esp_idf_version.h"
 #include "esp_http_server.h"
-#include "driver/gpio.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
-#include "sdkconfig.h"
 #include "app_config.h"
 #include "net_bridge.h"
 #include "ota.h"
+#include "setup.h"
 #include "setup_ap.h"
 
-static const char *TAG = "setup";
+static const char *TAG = "setup_ap";
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
 #define BR_WIFI_BW20 WIFI_BW20
@@ -35,11 +38,6 @@ static const char *TAG = "setup";
 
 #define AP_CHANNEL      1           // STA 가 연결돼 있으면 STA 채널을 따라감
 #define AP_MAX_CONN     2
-#define TASK_PRIO       2           // 중계(UART/net) 태스크보다 낮게
-#define TICK_MS         100
-#define BTN_HOLD_MS     3000
-#define OPEN_RETRY_US   (1000LL * 1000)
-#define IDLE_TIMEOUT_US ((int64_t)CONFIG_BR_SETUP_AP_TIMEOUT_S * 1000 * 1000)
 #define BODY_MAX        1024
 #define FIELD_MAX       16
 
@@ -50,12 +48,7 @@ _Static_assert(sizeof(CONFIG_BR_SETUP_AP_PASS) == 1 ||
 static esp_netif_t      *s_ap_netif;
 static wifi_config_t     s_ap_cfg;
 static httpd_handle_t    s_httpd;
-static bool              s_ready;           // 관리 태스크 동작 중
-static volatile bool     s_want;            // 열기 요청 (false = 닫기)
-static volatile bool     s_on;              // AP 동작 중
-static volatile bool     s_reboot;          // 웹 저장 후 재부팅 예약
 static volatile int      s_clients;         // AP 접속 단말 수
-static volatile int64_t  s_idle_since;      // 단말이 없어진 시각
 
 // ───────── 웹 페이지 ─────────
 
@@ -336,7 +329,7 @@ static esp_err_t h_save(httpd_req_t *req)
         return page_msg(req, "500 Internal Server Error", msg);
     }
     ESP_LOGI(TAG, "config saved from setup page - rebooting");
-    s_reboot = true;                    // 응답을 보낸 뒤 관리 태스크가 재부팅
+    setup_reboot(false);                // 응답을 보낸 뒤 관리 태스크가 재부팅
     return page_msg(req, "200 OK", "저장했습니다. 재부팅하면 새 설정으로 동작하고 설정 AP 는 닫힙니다.");
 }
 
@@ -345,15 +338,27 @@ static const httpd_uri_t URI_SAVE = { .uri = "/save", .method = HTTP_POST, .hand
 
 // ───────── AP 열기/닫기 ─────────
 
-void setup_ap_prepare(void)
+static void on_ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    uint8_t mac[6] = {0};
+    if (id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *e = data;
+        s_clients++;
+        ESP_LOGI(TAG, "client " MACSTR " joined (%d)", MAC2STR(e->mac), s_clients);
+    } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *e = data;
+        if (s_clients > 0) {
+            s_clients--;
+        }
+        ESP_LOGI(TAG, "client " MACSTR " left (%d)", MAC2STR(e->mac), s_clients);
+    }
+}
+
+void sap_prepare(const char *ssid)
+{
     wifi_ap_config_t *ap = &s_ap_cfg.ap;
 
     s_ap_netif = esp_netif_create_default_wifi_ap();
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    int n = snprintf((char *)ap->ssid, sizeof(ap->ssid), "AGVBR-%02u-%02X%02X", g_cfg.agv_id, mac[4], mac[5]);
-    ap->ssid_len       = (uint8_t)n;
+    ap->ssid_len       = (uint8_t)strlcpy((char *)ap->ssid, ssid, sizeof(ap->ssid));
     strlcpy((char *)ap->password, CONFIG_BR_SETUP_AP_PASS, sizeof(ap->password));
     ap->authmode       = ap->password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     ap->channel        = AP_CHANNEL;
@@ -368,10 +373,15 @@ void setup_ap_prepare(void)
         // STA 와 같이 20MHz — 혼잡한 공장 채널에서 40MHz 로 주변 AP 와 겹치지 않게
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_bandwidth(WIFI_IF_AP, BR_WIFI_BW20));
     }
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, on_ap_event, NULL);
+    esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, on_ap_event, NULL);
 }
 
-static esp_err_t ap_open(void)
+esp_err_t sap_open(void)
 {
+    if (s_ap_netif == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err == ESP_OK) {
         err = esp_wifi_set_config(WIFI_IF_AP, &s_ap_cfg);   // 사전 등록이 유지되지 않는 경우 대비 (같은 값)
@@ -382,7 +392,7 @@ static esp_err_t ap_open(void)
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "setup AP start failed: %s - retrying", esp_err_to_name(err));
+        ESP_LOGW(TAG, "setup AP start failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -401,134 +411,25 @@ static esp_err_t ap_open(void)
 
     esp_netif_ip_info_t ip = {0};
     esp_netif_get_ip_info(s_ap_netif, &ip);
-    s_clients    = 0;
-    s_idle_since = esp_timer_get_time();
-    s_on         = true;
+    s_clients = 0;
     ESP_LOGW(TAG, "setup AP \"%s\" open - http://" IPSTR, (const char *)s_ap_cfg.ap.ssid, IP2STR(&ip.ip));
     return ESP_OK;
 }
 
-static void ap_close(void)
+void sap_close(void)
 {
     if (s_httpd) {
         httpd_stop(s_httpd);
         s_httpd = NULL;
     }
     esp_wifi_set_mode(WIFI_MODE_STA);
-    s_on      = false;
     s_clients = 0;
     ESP_LOGI(TAG, "setup AP closed");
 }
 
-static void on_ap_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+int sap_clients(void)
 {
-    if (id == WIFI_EVENT_AP_STACONNECTED) {
-        wifi_event_ap_staconnected_t *e = data;
-        s_clients++;
-        ESP_LOGI(TAG, "client " MACSTR " joined (%d)", MAC2STR(e->mac), s_clients);
-    } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
-        wifi_event_ap_stadisconnected_t *e = data;
-        if (s_clients > 0 && --s_clients == 0) {
-            s_idle_since = esp_timer_get_time();
-        }
-        ESP_LOGI(TAG, "client " MACSTR " left (%d)", MAC2STR(e->mac), s_clients);
-    }
+    return s_clients;
 }
 
-// AP 열기/닫기·버튼·유휴 종료·웹 저장 후 재부팅을 한 태스크에서 처리 (Wi-Fi 모드 변경을 한곳으로)
-static void setup_task(void *arg)
-{
-    int64_t next_try = 0;
-#if CONFIG_BR_SETUP_BTN_GPIO >= 0
-    uint32_t btn_ms = 0;
-#endif
-
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(TICK_MS));
-        int64_t now = esp_timer_get_time();
-
-        if (s_reboot) {
-            vTaskDelay(pdMS_TO_TICKS(1000));    // 응답 페이지 전송 여유
-            esp_restart();
-        }
-
-#if CONFIG_BR_SETUP_BTN_GPIO >= 0
-        // 설정 버튼 3초 → AP 열기
-        if (gpio_get_level(CONFIG_BR_SETUP_BTN_GPIO) == 0) {
-            btn_ms += TICK_MS;
-            if (btn_ms == BTN_HOLD_MS) {
-                ESP_LOGI(TAG, "setup button held");
-                setup_ap_request(true);
-            }
-        } else {
-            btn_ms = 0;
-        }
-#endif
-
-        if (s_want && !s_on && now >= next_try) {
-            if (ap_open() != ESP_OK) {
-                next_try = now + OPEN_RETRY_US;
-            }
-        } else if (!s_want && s_on) {
-            ap_close();
-        }
-
-        // 단말 없이 STA 연결 상태가 timeout 지속 → 닫음. STA 미연결이면 유일한 접근 경로이므로 유지
-        if (s_on && s_clients == 0 && net_is_up() && now - s_idle_since >= IDLE_TIMEOUT_US) {
-            ESP_LOGI(TAG, "setup AP idle for %ds", CONFIG_BR_SETUP_AP_TIMEOUT_S);
-            s_want = false;
-            ap_close();
-        }
-
-        // 단말이 설정 페이지를 쓰는 동안 STA 재접속(전 채널 스캔)을 멈춰 AP 채널을 유지
-        net_sta_hold(s_on && s_clients > 0 && !net_is_up());
-    }
-}
-
-esp_err_t setup_ap_init(void)
-{
-    ESP_RETURN_ON_FALSE(s_ap_netif, ESP_ERR_INVALID_STATE, TAG, "AP netif");
-    ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, on_ap_event, NULL),
-                        TAG, "ap evt");
-    ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, on_ap_event, NULL),
-                        TAG, "ap evt");
-#if CONFIG_BR_SETUP_BTN_GPIO >= 0
-    const gpio_config_t io = {
-        .pin_bit_mask = 1ULL << CONFIG_BR_SETUP_BTN_GPIO,
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "button");
-#endif
-    ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCore(setup_task, "setup", 4096, NULL, TASK_PRIO, NULL, 0) == pdPASS,
-                        ESP_ERR_NO_MEM, TAG, "setup task");
-    s_ready = true;
-    return ESP_OK;
-}
-
-void setup_ap_request(bool open)
-{
-    if (open && s_on) {
-        s_idle_since = esp_timer_get_time();    // 이미 열려 있으면 유휴 시간만 연장
-    }
-    s_want = open;
-}
-
-bool setup_ap_active(void)
-{
-    return s_on;
-}
-
-size_t setup_ap_format(char *buf, size_t cap)
-{
-    int n;
-    if (!s_ready) {
-        n = snprintf(buf, cap, "setup AP: unavailable (Wi-Fi not started)\n");
-    } else if (s_on) {
-        n = snprintf(buf, cap, "setup AP: on ssid=%s clients=%d%s\n", (const char *)s_ap_cfg.ap.ssid, s_clients,
-                     s_want ? "" : " (closing)");
-    } else {
-        n = snprintf(buf, cap, "setup AP: %s ssid=%s\n", s_want ? "opening" : "off", (const char *)s_ap_cfg.ap.ssid);
-    }
-    return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
-}
+#endif // CONFIG_BR_SETUP_SOFTAP

@@ -47,6 +47,7 @@ typedef struct {
 
 static port_ctx_t    s_port[PORT_COUNT];
 static QueueHandle_t s_main_txq;
+static volatile bool s_raw;         // 메인보드 UART 원시 모드 (DSP 프로그래밍)
 
 // 프레임 종료 판단용 무수신 시간(ms) → UART RX TOUT 심볼 수
 static uint8_t gap_to_symbols(uint32_t baud, uint32_t gap_ms)
@@ -118,10 +119,18 @@ static void uart_rx_task(void *arg)
 
     for (;;) {
         if (xQueueReceive(p->evq, &ev, len ? flush_to : portMAX_DELAY) != pdTRUE) {
+            if (s_raw && p == &s_port[PORT_MAIN]) {
+                len = 0;
+                continue;
+            }
             if (p->etx != NO_ETX) {
                 p->st.no_etx++;     // ETX 없이 끊긴 프레임 (노이즈·체크섬 충돌 등) — 그대로 전달
             }
             emit(p, frame, &len);
+            continue;
+        }
+        if (s_raw && p == &s_port[PORT_MAIN]) {
+            len = 0;                // 원시 모드: 데이터는 raw_read 가 직접 읽음, 이벤트만 소비
             continue;
         }
         switch (ev.type) {
@@ -243,7 +252,7 @@ esp_err_t uart_bridge_start(frame_cb_t on_main, frame_cb_t on_rfid)
 bool uart_bridge_send_main(const uint8_t *data, size_t len)
 {
     tx_item_t item;
-    if (len == 0 || len > FRAME_MAX) {
+    if (len == 0 || len > FRAME_MAX || s_raw) {
         s_port[PORT_MAIN].st.tx_drop++;
         return false;
     }
@@ -259,4 +268,45 @@ bool uart_bridge_send_main(const uint8_t *data, size_t len)
 const uart_stat_t *uart_bridge_stat(port_id_t port)
 {
     return &s_port[port].st;
+}
+
+esp_err_t uart_bridge_raw_begin(void)
+{
+    if (s_raw) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_raw = true;
+    xQueueReset(s_main_txq);                                // 대기 중 프레임 폐기
+    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(200));       // 송신 중인 프레임 완료
+    uart_flush_input(MAIN_UART);
+    ESP_LOGW(TAG, "main UART raw mode on (bridge paused)");
+    return ESP_OK;
+}
+
+void uart_bridge_raw_end(void)
+{
+    uart_flush_input(MAIN_UART);
+    xQueueReset(s_port[PORT_MAIN].evq);
+    s_raw = false;
+    ESP_LOGI(TAG, "main UART raw mode off");
+}
+
+int uart_bridge_raw_read(uint8_t *buf, size_t n, uint32_t timeout_ms)
+{
+    int r = uart_read_bytes(MAIN_UART, buf, n, pdMS_TO_TICKS(timeout_ms));
+    if (r > 0) {
+        s_port[PORT_MAIN].st.rx_bytes += r;
+    }
+    return r;
+}
+
+void uart_bridge_raw_write(const uint8_t *buf, size_t n)
+{
+    uart_write_bytes(MAIN_UART, buf, n);
+    s_port[PORT_MAIN].st.tx_bytes += n;
+}
+
+bool uart_bridge_raw_active(void)
+{
+    return s_raw;
 }

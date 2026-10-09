@@ -12,7 +12,7 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 - **RFID 리더 → 메인보드**: 기존 통신보드처럼 바이패스합니다. Wi-Fi 연결과 무관하게 동작합니다.
 - **RFID 리더 → 네트워크**: 브로드캐스트(기본값) 또는 지정 IP 로 송신합니다.
 - 메인보드로 가는 데이터(RFID, ACS 하향)는 송신 태스크 하나가 **프레임 단위로** 내보냅니다. 두 데이터가 섞이지 않습니다.
-- **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰(설정 AP 웹 페이지)으로도 바꿀 수 있습니다.
+- **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰 블루투스(BLE)로도 바꿀 수 있습니다.
 
 ## 빌드 없이 굽기 (GitHub Actions 빌드 결과)
 
@@ -40,7 +40,7 @@ zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridg
 
 ```bash
 idf.py set-target esp32s3
-idf.py menuconfig        # AGV Wi-Fi Bridge 메뉴: 기본 SSID/서버 IP/핀/프레임 간격/설정 AP
+idf.py menuconfig        # AGV Wi-Fi Bridge 메뉴: 기본 SSID/서버 IP/핀/프레임 간격/무선 설정
 idf.py -p COM5 flash monitor
 ```
 
@@ -64,7 +64,7 @@ idf.py -p COM5 flash monitor
 |---|---|---|
 | USB 시리얼 콘솔 | 벤치, 처음 굽을 때 | USB 케이블 |
 | 서버 원격 설정 (UDP) | 운용 중인 호기의 IP·서버 주소·보드레이트 등 변경 | 기존 Wi-Fi |
-| 설정 AP (휴대폰 웹) | 처음 설치, SSID/비밀번호가 틀려 Wi-Fi 에 못 붙을 때 | ESP 가 직접 띄우는 AP |
+| 휴대폰 BLE | 처음 설치, SSID/비밀번호가 틀려 Wi-Fi 에 못 붙을 때 | 블루투스(BLE) 터미널 앱 |
 
 ### 1. USB 시리얼 콘솔 (유선)
 
@@ -91,7 +91,7 @@ bridge> reboot
 | `stat` | Wi-Fi(RSSI, BSSID), 송수신·오류 카운터 (`tx_offline`: Wi-Fi 끊김 중 폐기, `tx_drop`: 메인보드 송신 폐기) |
 | `mon 1` / `mon 0` | 모든 프레임 hex 덤프 (벤치 확인용) |
 | `ota` / `ota <url>` / `ota confirm` | 펌웨어 상태 / 수동 OTA / 롤백 대기 수동 확정 |
-| `setup` / `setup on` / `setup off` | 설정 AP 상태 / 열기 / 닫기 |
+| `setup` / `setup on` / `setup off` | 무선 설정 모드(BLE) 상태 / 열기 / 닫기 |
 
 ### 2. 서버 원격 설정 (무선, UDP)
 
@@ -105,34 +105,49 @@ cfg 7 save
 cfg 7 reboot
 ```
 
-명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `setup on|off` (`defaults` 는 원격에서 불가)
+명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup on|off` | `help` (`defaults` 는 원격에서 불가)
 
 - **원격 저장은 확인 대기 상태로 저장됩니다.** 재부팅 후 180초 안에 서버에서 하향 패킷(PING 등)을 받지 못하면 저장 직전 설정으로 되돌리고 다시 재부팅합니다. SSID·IP·서버 주소를 잘못 넣어도 호기와 연결이 끊긴 채로 남지 않습니다(OTA 롤백과 같은 기준).
 - 서버 IP 를 바꾼 경우에는 **새 서버**가 180초 안에 패킷을 보내야 확정됩니다.
 - 상태는 `cfg` 출력의 `state=` 와 heartbeat 의 `cfg`(`saved` / `trial` / `default`)로 봅니다.
-- 콘솔이나 설정 AP 에서 저장하면 현장 확인으로 보고 대기 중인 복구를 취소합니다.
+- 콘솔이나 휴대폰(BLE)에서 저장하면 현장 확인으로 보고 대기 중인 복구를 취소합니다.
 - 인증은 서버 IP 필터뿐입니다(`OTA_START` 와 같은 수준). 사내망 전제입니다.
 
-### 3. 설정 AP (무선, 휴대폰)
+### 3. 휴대폰 BLE (무선, 현장)
 
-ESP 가 직접 AP 를 띄우고 웹 페이지로 설정합니다. 그동안 브리지(STA) 중계는 그대로 동작합니다.
+휴대폰 블루투스(BLE)로 ESP 에 접속해 콘솔과 같은 명령을 입력합니다. 회사 Wi-Fi 보안 정책과 관계없이 쓸 수 있고, 그동안에도 브리지 중계는 계속 동작합니다.
 
-1. AP 열기 — 다음 중 하나
+1. 설정 모드 열기 — 다음 중 하나
    - 저장된 설정이 없을 때(처음 설치, `defaults` 후) 부팅하면 자동으로 열림
    - **BOOT 버튼(GPIO0) 3초** 누름
    - 콘솔 `setup on` / 서버 `cfg 7 setup on`
-2. 휴대폰 Wi-Fi 목록에서 `AGVBR-<호기>-<MAC 끝 4자리>` 에 접속합니다. 비밀번호 기본값은 `agvsetup` 이니 menuconfig 에서 바꾸세요.
-3. 브라우저에서 `http://192.168.4.1` 을 열어 값을 고치고 **저장 후 재부팅**을 누릅니다.
+2. 휴대폰 BLE 터미널 앱으로 `AGVBR-<호기>-<MAC 끝 4자리>` 에 연결합니다.
+   - Android: **Serial Bluetooth Terminal** → 메뉴 Devices → **Bluetooth LE** 탭 → SCAN
+   - iPhone: **Bluefruit Connect** → 연결 → UART (또는 nRF Toolbox → UART)
+   - 앱의 블루투스 목록(설정 → 블루투스)에서 페어링하는 방식이 아닙니다. 반드시 앱 안에서 스캔해 연결합니다.
+3. 아래처럼 입력합니다.
+   ```
+   login agvsetup
+   set agv 7
+   set ssid AGV_WIFI
+   set pass mypassword
+   set ip 192.168.10.107
+   set gw 192.168.10.1
+   set server 192.168.10.10
+   save
+   reboot
+   ```
+4. 재부팅 후에도 BLE 가 다시 열려 있으므로, 다시 연결해 `login` → `stat` 으로 `wifi: UP` 을 확인합니다.
 
-- 비밀번호 칸을 비우면 기존 값을 유지하고, `-` 를 넣으면 비밀번호 없음입니다.
-- 값이 하나라도 잘못되면 아무것도 저장하지 않고 해당 항목을 알려 줍니다.
-- 접속한 단말 없이 Wi-Fi 연결 상태가 5분 지나면 AP 가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
-- 휴대폰이 접속해 있는 동안은 Wi-Fi(STA) 재접속을 멈춥니다. 재접속 스캔 중에는 AP 가 다른 채널로 빠져 휴대폰 연결이 끊기기 때문입니다.
-- 웹 페이지는 설정 AP 쪽으로 들어온 요청만 받습니다. 공장망 IP 로는 열리지 않습니다.
-- AP 대역은 192.168.4.0/24 입니다. 공장망이 같은 대역이면 주소가 겹칩니다.
-- AP 를 열면 같은 채널에 비콘이 하나 늘어납니다. 여러 호기에서 동시에 열어 두지 마세요(heartbeat `ap` 필드로 확인).
+- 비밀번호 기본값은 `agvsetup` 입니다. menuconfig 에서 바꾸세요. 새로 연결할 때마다 `login` 이 필요합니다.
+- 명령: `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup off` · `help`. 현장 저장이라 즉시 확정됩니다.
+- 휴대폰 연결 없이 Wi-Fi 연결 상태로 5분이 지나면 설정 모드가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
+- **BLE 는 설정 모드 동안만 켭니다.** Wi-Fi 와 무선부(2.4GHz)를 나눠 쓰기 때문에, 휴대폰이 연결된 동안에는 Wi-Fi 지연이 늘 수 있습니다. 설정 모드가 닫히면 BT 컨트롤러를 완전히 내려 평상시 성능에는 영향이 없습니다. 운용 중 호기는 **AGV 정지 상태에서** 여세요.
+- ESP32-S3 는 BLE 만 지원합니다. 클래식 블루투스(SPP) 전용 앱으로는 보이지 않습니다.
 
-`menuconfig > AGV Wi-Fi Bridge > Wireless setup` 에서 AP 비밀번호, 자동 종료 시간, 첫 부팅 자동 열기, 버튼 GPIO(-1 = 사용 안 함)를 바꿀 수 있습니다.
+**Wi-Fi 설정 AP + 웹 페이지 (선택, 기본 꺼짐)** — `menuconfig > Wireless setup > Wi-Fi SoftAP` 을 켜면 설정 모드에서 AP(`http://192.168.4.1`)도 함께 띄웁니다. 사내 무선 보안(WIPS)이 비인가 AP 를 차단하거나 경보를 내는 현장에서는 쓰지 마세요.
+
+`menuconfig > AGV Wi-Fi Bridge > Wireless setup` 에서 BLE 비밀번호, 자동 종료 시간, 첫 부팅 자동 열기, 버튼 GPIO(-1 = 사용 안 함), SoftAP 사용 여부를 바꿀 수 있습니다.
 
 ## 기본 핀
 
@@ -178,13 +193,34 @@ ESP 가 직접 AP 를 띄우고 웹 페이지로 설정합니다. 그동안 브�
 | `0x21` PONG | ESP → 서버 | PING 의 seq·payload 그대로 |
 | `0x30` OTA_START | 서버 → ESP | 펌웨어 URL (ASCII, AGV ID 일치 시만) |
 | `0x31` OTA_RESULT | ESP → 서버 | JSON: stage(start/progress/done/fail/busy), pct, err |
+| `0x11` INFO_REQ | 서버 → ESP | 없음 — 장치 정보 요청 |
+| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw, part, ota, cfg, setup, up, dsp, dspb, dsp_build, dsp_st, staged |
+| `0x32` DSP_OTA_START | 서버 → ESP | JSON: url, ver, crc32, size, job, apply — 메인보드 이미지(.dspfw) 스테이징 (AGV ID 일치 시만) |
+| `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage(download/staged/start/enter/erase/progress/verify/done/fail), pct, ver, err |
+| `0x34` DSP_OTA_APPLY | 서버 → ESP | JSON: job — 스테이징된 이미지를 메인보드에 적용 (AGV ID 일치 시만) |
 | `0x40` CFG_CMD | 서버 → ESP | 설정 명령 한 줄 (텍스트, AGV ID 일치 시만) |
 | `0x41` CFG_RESULT | ESP → 서버 | 명령 결과 텍스트 (seq = 요청 seq) |
 
 - 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어와 원격 변경 설정이 확정(롤백 취소)됩니다.
-- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `ap`(설정 AP 1/0) 가 포함됩니다.
+- STATUS JSON 에 `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `setup`(무선 설정 모드 1/0), `dsp`/`dspb`/`dsp_build`(메인보드 앱·부트로더 버전·빌드일), `dsp_st`(idle/downloading/staged/programming), `staged`(대기 중 이미지 {job, ver} 또는 null) 가 포함됩니다.
 - 서버는 ESP 가 보낸 패킷의 송신 endpoint(IP:50000)를 기억했다가 그곳으로 하향 송신하면 됩니다.
 - Wi-Fi 가 끊긴 동안의 상향 프레임은 **버퍼링하지 않고 폐기**합니다. 지난 교통제어 패킷이 늦게 도착하는 것보다 메인보드 재전송이 안전합니다. seq 는 계속 증가하므로 서버에서 누락 구간이 보입니다.
+
+## 메인보드(TMS320F2808) 펌웨어 OTA
+
+메인보드에 상주 부트로더(플래시 섹터 A)를 넣고, 브리지가 서버에서 받은 이미지를 UART 로 프로그래밍합니다. 설계·규격은 [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md), 부트로더·앱 수정·CCS 설정은 [dsp/README.md](dsp/README.md).
+
+```
+dspota 7 stage app_1.2.3.dspfw        # (BridgeTest) 스테이징 — 주행 중에도 가능, 브리지가 dspfw 파티션에 보관
+dspota 7 apply                        # 정지 상태에서 적용: 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
+info 7                                # 메인보드 앱/부트로더 버전, 스테이징 상태
+```
+
+- 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
+- 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 `apply` 하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
+- 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다.
+- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply`.
+- **파티션 변경**: 0.5.0 부터 OTA 슬롯 1.75MB + `dspfw` 384KB. 이전 버전 브리지는 USB 로 한 번 전체를 다시 구워야 합니다.
 
 ## 벤치 테스트 순서
 

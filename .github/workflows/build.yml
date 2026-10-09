@@ -61,7 +61,7 @@ jobs:
               esptool --chip esp32s3 -p COM5 write_flash 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin
 
           [호기 설정]
-            처음 부팅 시 설정 AP(AGVBR-xx-xxxx, 비밀번호 agvsetup) 자동 열림 → 휴대폰으로 http://192.168.4.1
+            처음 부팅 시 무선 설정 모드(BLE) 자동 열림 → 휴대폰 BLE 터미널 앱으로 AGVBR-xx-xxxx 연결, login agvsetup
             또는 USB 콘솔(115200) set/save/reboot, 서버 원격 cfg 명령. 자세한 절차: FLASH_GUIDE.md
 
           [OTA — 서버에서 무선 업데이트]
@@ -69,12 +69,13 @@ jobs:
             (BridgeTest: ota <agv> agv_wifi_bridge.bin)
 
           [개별 오프셋]  flash_args 참조 (bootloader 0x0, partition-table 0x8000, ota_data 0xf000, app 0x20000)
+          ※ 0.5.0 부터 파티션이 바뀜(OTA 슬롯 1.75MB + dspfw). 이전 버전에서 올 때는 USB 전체 굽기 필요
           TXT
           cd dist && zip -r "agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip" "agv_wifi_bridge_${{ steps.ver.outputs.ver }}"
           ls -l
           # 앱 크기 / OTA 슬롯(0x1E0000) 사용률을 실행 요약에 표시
           APP=$(stat -c %s "agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin")
-          SLOT=$((0x1E0000))
+          SLOT=$((0x1C0000))
           {
             echo "### agv_wifi_bridge ${{ steps.ver.outputs.ver }}"
             echo "- app: $APP bytes ($((APP * 100 / SLOT))% of OTA slot $SLOT)"
