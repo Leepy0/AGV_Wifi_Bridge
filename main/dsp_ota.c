@@ -32,7 +32,9 @@ static const char *TAG = "dsp_ota";
 #define APP_REPLY_MS        2000        // 앱 F→R 응답 대기
 #define BOOT_START_MS       400         // UOK 후 워치독 리셋 → 부트로더 기동 여유
 #define RESP_MS             800         // 부트로더 일반 응답
+#define HELLO_MS            1500        // 첫 HELLO (앱 리셋 → 부트로더 기동 직후, 3회 재시도 = 4.5초)
 #define ERASE_MS            20000
+#define MAX_REDIRECTS       3
 #define RETRIES             3
 #define APP_UP_TRIES        8           // RESET 후 앱 기동 확인 (1초 간격)
 #define VER_QUERY_RETRY_S   60          // 버전 모를 때 재조회 간격
@@ -226,12 +228,23 @@ static const char *download(const cmd_t *c)
     }
     const char *err = NULL;
     uint32_t pos = 0;
-    if (esp_http_client_open(h, 0) != ESP_OK) {
-        err = "http_open";
-        goto out;
+    int64_t clen = 0;
+    int status = 0;
+    // esp_http_client_open 은 3xx 를 따라가지 않으므로 Location 으로 다시 연다 (esp_https_ota 와 같은 동작)
+    for (int redirects = 0; ; redirects++) {
+        if (esp_http_client_open(h, 0) != ESP_OK) {
+            err = "http_open";
+            goto out;
+        }
+        clen = esp_http_client_fetch_headers(h);
+        status = esp_http_client_get_status_code(h);
+        if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && redirects < MAX_REDIRECTS) {
+            esp_http_client_set_redirection(h);
+            esp_http_client_close(h);
+            continue;
+        }
+        break;
     }
-    int64_t clen = esp_http_client_fetch_headers(h);
-    int status = esp_http_client_get_status_code(h);
     if (status != 200) {
         err = "http_status";
         goto out;
@@ -240,13 +253,16 @@ static const char *download(const cmd_t *c)
         err = "http_length";
         goto out;
     }
-    // 머리 4KB 포함 전체를 지움 (머리가 지워지므로 다운로드 중에는 '스테이징 없음')
+    // 머리 섹터부터 지움 (머리가 지워지므로 다운로드 중에는 '스테이징 없음').
+    // 나머지는 쓰기 직전에 4KB 씩 지운다 — 384KB 를 한 번에 지우면 그동안 캐시가 꺼져 UART 중계 태스크까지 멈춘다
     memset(&s_stage, 0, sizeof(s_stage));
-    uint32_t erase = ((uint32_t)clen + STAGE_HDR_LEN + 4095) & ~4095U;
-    if (esp_partition_erase_range(s_part, 0, erase) != ESP_OK) {
+    uint32_t erased = 0;
+    const uint32_t need = ((uint32_t)clen + STAGE_HDR_LEN + 4095) & ~4095U;
+    if (esp_partition_erase_range(s_part, 0, 4096) != ESP_OK) {
         err = "flash_erase";
         goto out;
     }
+    erased = 4096;
     int last_pct = -1;
     for (;;) {
         int n = esp_http_client_read(h, (char *)s_http, HTTP_BUF);
@@ -260,6 +276,14 @@ static const char *download(const cmd_t *c)
         if (pos + n > (uint32_t)clen) {
             err = "http_overrun";
             goto out;
+        }
+        while (erased < STAGE_HDR_LEN + pos + (uint32_t)n && erased < need) {
+            if (esp_partition_erase_range(s_part, erased, 4096) != ESP_OK) {
+                err = "flash_erase";
+                goto out;
+            }
+            erased += 4096;
+            vTaskDelay(1);          // 섹터 지우기 사이에 중계 태스크가 돌 틈
         }
         if (esp_partition_write(s_part, STAGE_HDR_LEN + pos, s_http, n) != ESP_OK) {
             err = "flash_write";
@@ -401,20 +425,25 @@ static const char *program(uint32_t job, char *newver, size_t vcap)
         return "uart_busy";
     }
     const char *err = NULL;
-    int n = bl_xfer(BP_CMD_HELLO, NULL, 0, resp, RESP_MS);
+    int n = bl_xfer(BP_CMD_HELLO, NULL, 0, resp, HELLO_MS);
     if (n != BP_HELLO_RESP_LEN || resp[0] != BP_ST_OK) {
         err = "no_bootloader";
         goto out;
     }
     if (resp[1] != BP_PROTO_VER || (resp[2] | (resp[3] << 8)) < BP_BLOCK_WORDS) {
+        // 아직 아무것도 지우지 않았다 — 부트로더에 머물지 않도록 유효한 앱으로 되돌린다
+        pl[0] = 0;
+        bl_xfer(BP_CMD_RESET, pl, 1, resp, RESP_MS);
         err = "boot_proto";
         goto out;
     }
     strlcpy(s_dsp_boot, (const char *)&resp[5], sizeof(s_dsp_boot));
 
-    // 3. 지우기
+    // 3. 지우기 — 이 뒤로는 메인보드에 앱이 없다: 실패해도 heartbeat 가 옛 버전을 보고하지 않게 '?' 로
     report(job, "erase", -1, NULL, NULL);
     pl[0] = BP_ERASE_APP;
+    strlcpy(s_dsp_ver, "?", sizeof(s_dsp_ver));
+    strlcpy(s_dsp_build, "?", sizeof(s_dsp_build));
     if (bl_xfer(BP_CMD_ERASE, pl, 1, resp, ERASE_MS) != 1 || resp[0] != BP_ST_OK) {
         err = "erase";
         goto out;
@@ -431,8 +460,9 @@ static const char *program(uint32_t job, char *newver, size_t vcap)
         if (nw == 0 || nw > BP_BLOCK_WORDS || pos + 6 + nw * 2 > s_stage.file_len) { err = "stage_block"; goto out; }
         memcpy(pl, bh, 6);
         if (esp_partition_read(s_part, STAGE_HDR_LEN + pos + 6, pl + 6, nw * 2) != ESP_OK) { err = "stage_read"; goto out; }
-        if (bl_xfer(BP_CMD_WRITE, pl, 6 + nw * 2, resp, RESP_MS) != 5 || resp[0] != BP_ST_OK) {
-            err = resp[0] == BP_ST_PROG_FAIL ? "program" : resp[0] == BP_ST_VERIFY_FAIL ? "verify_block" : "write";
+        int wn = bl_xfer(BP_CMD_WRITE, pl, 6 + nw * 2, resp, RESP_MS);
+        if (wn != 5 || resp[0] != BP_ST_OK) {
+            err = wn < 0 ? "write_timeout" : resp[0] == BP_ST_PROG_FAIL ? "program" : resp[0] == BP_ST_VERIFY_FAIL ? "verify_block" : "write";
             goto out;
         }
         pos += 6 + nw * 2;
@@ -527,6 +557,10 @@ static void dsp_task(void *arg)
             query_version();
             break;
         case CMD_START: {
+            if (!s_part) {
+                report(c.job, "fail", -1, NULL, "no_partition");
+                break;
+            }
             if (s_state == ST_PROGRAMMING) {
                 report(c.job, "fail", -1, NULL, "busy");
                 break;
@@ -546,6 +580,10 @@ static void dsp_task(void *arg)
             }
         }   /* fallthrough */
         case CMD_APPLY: {
+            if (!s_part) {
+                report(c.job, "fail", -1, NULL, "no_partition");
+                break;
+            }
             if (c.type == CMD_APPLY && s_stage.magic[0] && c.job != 0 && c.job != s_stage.job) {
                 report(c.job, "fail", -1, s_stage.ver, "job_mismatch");
                 break;
@@ -628,8 +666,8 @@ void dsp_ota_start(const char *json, size_t len)
     c.crc32 = json_u32(json, len, "crc32");
     c.size  = json_u32(json, len, "size");
     c.apply = json_u32(json, len, "apply") != 0;
-    if (xQueueSend(s_q, &c, 0) != pdTRUE) {
-        report(c.job, "fail", -1, NULL, "busy");
+    if (!s_q || xQueueSend(s_q, &c, 0) != pdTRUE) {
+        report(c.job, "fail", -1, NULL, s_q ? "busy" : "not_ready");
     }
 }
 
@@ -637,15 +675,17 @@ void dsp_ota_apply(const char *json, size_t len)
 {
     cmd_t c = { .type = CMD_APPLY };
     c.job = json_u32(json, len, "job");
-    if (xQueueSend(s_q, &c, 0) != pdTRUE) {
-        report(c.job, "fail", -1, NULL, "busy");
+    if (!s_q || xQueueSend(s_q, &c, 0) != pdTRUE) {
+        report(c.job, "fail", -1, NULL, s_q ? "busy" : "not_ready");
     }
 }
 
 void dsp_ota_query_version(void)
 {
     cmd_t c = { .type = CMD_QUERY_VER };
-    xQueueSend(s_q, &c, 0);
+    if (s_q) {
+        xQueueSend(s_q, &c, 0);
+    }
 }
 
 bool dsp_ota_busy(void)
@@ -656,7 +696,7 @@ bool dsp_ota_busy(void)
 size_t dsp_ota_status_json(char *buf, size_t cap)
 {
     int n = snprintf(buf, cap, "\"dsp\":\"%s\",\"dspb\":\"%s\",\"dsp_build\":\"%s\",\"dsp_st\":\"%s\",\"staged\":",
-                     s_dsp_ver, s_dsp_boot, s_dsp_build, ST_NAME[s_state]);
+                     s_dsp_ver, s_dsp_boot, s_dsp_build, s_part ? ST_NAME[s_state] : "nopart");
     if (n < 0) return 0;
     if ((size_t)n < cap) {
         n += s_stage.magic[0]
@@ -669,19 +709,23 @@ size_t dsp_ota_status_json(char *buf, size_t cap)
 size_t dsp_ota_format(char *buf, size_t cap)
 {
     int n = snprintf(buf, cap, "dsp : app=%s boot=%s build=%s state=%s staged=%s(job %lu) pan=%c\n",
-                     s_dsp_ver, s_dsp_boot, s_dsp_build, ST_NAME[s_state],
+                     s_dsp_ver, s_dsp_boot, s_dsp_build, s_part ? ST_NAME[s_state] : "nopart (USB reflash needed)",
                      s_stage.magic[0] ? s_stage.ver : "-", (unsigned long)s_stage.job, s_pan);
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
 esp_err_t dsp_ota_init(void)
 {
-    s_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, PART_LABEL);
-    ESP_RETURN_ON_FALSE(s_part, ESP_ERR_NOT_FOUND, TAG, "partition '%s' not found (partitions.csv)", PART_LABEL);
-    s_q = xQueueCreate(2, sizeof(cmd_t));
+    // 큐·세마포어를 먼저 만든다: 파티션이 없어도(구 파티션 테이블인 채 OTA 로 올라온 브리지) 서버 명령이 패닉 대신 거부되고 버전 조회는 된다
     s_reply_sem = xSemaphoreCreateBinary();
-    ESP_RETURN_ON_FALSE(s_q && s_reply_sem, ESP_ERR_NO_MEM, TAG, "queue");
-    if (stage_load()) {
+    QueueHandle_t q = xQueueCreate(2, sizeof(cmd_t));
+    ESP_RETURN_ON_FALSE(q && s_reply_sem, ESP_ERR_NO_MEM, TAG, "queue");
+    s_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, PART_LABEL);
+    if (!s_part) {
+        ESP_LOGE(TAG, "partition '%s' not found - mainboard OTA disabled until this bridge is reflashed over USB with the new partition table", PART_LABEL);
+    }
+    s_q = q;
+    if (s_part && stage_load()) {
         s_state = ST_STAGED;
         ESP_LOGI(TAG, "staged image: job %lu ver %s (%lu B)", (unsigned long)s_stage.job, s_stage.ver, (unsigned long)s_stage.file_len);
     }

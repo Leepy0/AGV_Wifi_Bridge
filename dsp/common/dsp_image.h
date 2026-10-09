@@ -37,6 +37,13 @@
 #define DSPIMG_BOOT_W_PROTO     2            // 프로토콜 버전
 #define DSPIMG_BOOT_W_VER       4            // 4..19: 부트로더 버전 문자열 (16 워드, NUL 종료)
 
+// 부트 카운터 (RAM 0x0007FA, 2 워드): [0] magic, [1] 앱이 fwup_boot_ok() 없이 리셋된 연속 횟수.
+// 부트로더가 앱으로 점프하기 전 +1, 앱이 정상 기동하면 0. MAX 를 넘으면 (CRC 는 맞지만 기동 직후 죽는 앱) 업데이트 모드로.
+// 전원 투입 직후 RAM 쓰레기는 magic 불일치로 0 취급. 양쪽 링커 cmd 에서 0x0007FA~0x0007FF 제외.
+#define DSPIMG_BOOTCNT_ADDR     0x0007FAUL
+#define DSPIMG_BOOTCNT_MAGIC    0xB00C
+#define DSPIMG_BOOTCNT_MAX      3
+
 // 부트플래그 (RAM 0x0007FC, 4 워드): 앱이 쓰고 부트로더가 읽은 뒤 지움
 #define DSPIMG_BOOTFLAG_ADDR    0x0007FCUL
 #define DSPIMG_BOOTFLAG_0       0xB007

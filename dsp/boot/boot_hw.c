@@ -118,6 +118,11 @@ void hw_timer_start(void)
     TIMER0TCR &= (uint16_t)~TIMER0TCR_TSS;        // 시작
 }
 
+uint32_t hw_timer_now(void)
+{
+    return TIMER0TIM;
+}
+
 int hw_timer_wrapped(void)
 {
     if (TIMER0TCR & TIMER0TCR_TIF) {

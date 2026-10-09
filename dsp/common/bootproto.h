@@ -61,6 +61,9 @@ typedef struct {
 void bp_init(bp_ctx_t *c, const bp_ops_t *ops);
 // 수신 바이트 하나 처리. 응답이 준비되면 1 (c->tx, c->tx_len) — 호출 측이 송신
 int  bp_rx_byte(bp_ctx_t *c, uint16_t b);
+// 패킷 수신 도중인지 (SOF 뒤 본문 대기 중). 호출 측이 바이트 간 공백이 길면 bp_rx_reset() 으로 재동기한다
+int  bp_rx_busy(const bp_ctx_t *c);
+void bp_rx_reset(bp_ctx_t *c);
 
 // 양쪽 공용
 uint16_t bp_crc16(const uint16_t *b, uint16_t n);
