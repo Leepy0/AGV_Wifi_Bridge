@@ -45,6 +45,7 @@ static const char *TAG = "dsp_ota";
 #define FINAL_REPORTS       3           // staged·done·fail 반복 횟수 (UDP 유실 대비, 서버는 중복에 안전)
 #define FINAL_REPORT_GAP_MS 300
 #define PEEK_LEN            (FILE_HDR_LEN + DSPIMG_HDR_WORDS * 2)   // 다운로드 머리 검사 (파일 헤더 + 앱 헤더)
+#define RECENT_S            600         // 같은 job 의 중복 START·APPLY(서버 재전송)에 최근 결과를 다시 보고하는 기간
 
 // 스테이징 파티션 머리 (64 B): 다운로드 완료 후 마지막에 기록 → 있으면 유효한 이미지
 typedef struct {
@@ -88,6 +89,19 @@ static SemaphoreHandle_t s_reply_sem;
 static volatile char     s_wait_msg;        // 기다리는 MSG ID (0 = 없음)
 static dap_reply_t       s_reply;
 static uint8_t           s_http[HTTP_BUF];
+// 서버 재전송 대비 (같은 job 의 중복 명령). 처리 중인 job 은 dsp 태스크만 쓰고 서버 수신 태스크는 읽기만 한다
+static volatile uint32_t s_cur_start;       // 처리 중인 START 의 job (apply:1 이면 이어지는 적용까지), 0 = 없음
+static volatile uint32_t s_cur_apply;       // 적용 중인 job, 0 = 없음
+// 최근 최종 결과 1건 — dsp 태스크만 읽고 쓴다 (경쟁 없음)
+static struct {
+    uint32_t job;               // 0 = 없음
+    bool     applied;           // 적용 단계 결과 (done·fail) — false 면 스테이징 단계 결과 (staged·다운로드 fail)
+    const char *stage;          // "staged" / "done" / "fail" (문자열 상수)
+    int      pct;
+    char     ver[16];           // "" = 없음
+    char     err[24];           // "" = 없음
+    int64_t  at_us;
+} s_recent;
 
 // ───────── 보고 ─────────
 
@@ -123,6 +137,35 @@ static void report_final_ex(uint32_t job, const char *stage, int pct, const char
 static void report_final(uint32_t job, const char *stage, int pct, const char *ver, const char *err)
 {
     report_final_ex(job, stage, pct, ver, err, true);
+}
+
+// dsp 태스크의 최종 보고: 보내고 최근 결과로 기억 (중복 명령에 다시 보고하려고). applied = 적용 단계 결과
+static void report_result(uint32_t job, bool applied, const char *stage, int pct, const char *ver, const char *err)
+{
+    report_final(job, stage, pct, ver, err);
+    if (job == 0) {
+        return;                             // job 미지정은 중복 판단 안 함
+    }
+    s_recent.job     = job;
+    s_recent.applied = applied;
+    s_recent.stage   = stage;
+    s_recent.pct     = pct;
+    strlcpy(s_recent.ver, ver ? ver : "", sizeof(s_recent.ver));
+    strlcpy(s_recent.err, err ? err : "", sizeof(s_recent.err));
+    s_recent.at_us   = esp_timer_get_time();
+}
+
+// 같은 job 의 최근 결과가 RECENT_S 안에 있으면 다시 보고하고 true. applied_only = 적용 단계 결과만 본다
+static bool replay_recent(uint32_t job, bool applied_only)
+{
+    if (job == 0 || s_recent.job != job || (applied_only && !s_recent.applied) ||
+        esp_timer_get_time() - s_recent.at_us > (int64_t)RECENT_S * 1000000) {
+        return false;
+    }
+    ESP_LOGW(TAG, "job %lu: duplicate command - repeating last result (%s)", (unsigned long)job, s_recent.stage);
+    report_final(job, s_recent.stage, s_recent.pct, s_recent.ver[0] ? s_recent.ver : NULL,
+                 s_recent.err[0] ? s_recent.err : NULL);
+    return true;
 }
 
 // ───────── 앱 프레임 (F/R) ─────────
@@ -633,6 +676,9 @@ static const char *apply(uint32_t job, bool recover)
     }
     // 상태를 먼저 세운 뒤 ESP OTA 를 본다 — ota_start 도 s_busy 를 먼저 세운 뒤 이쪽 상태를 보므로 동시에 시작해도 한쪽은 물러난다
     s_state = ST_PROGRAMMING;
+    // volatile 쓰기만으로는 다른 코어에서 뒤의 s_busy 읽기보다 늦게 보일 수 있다 (저장→적재 재배치).
+    // 전체 펜스로 '내 상태 쓰기 → 상대 플래그 읽기' 순서를 보장해야 ota.c 의 CAS(SEQ_CST) 와 상호 배제가 두 코어에서도 성립
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (ota_busy()) {
         s_state = ST_STAGED;
         return "esp_ota_busy";
@@ -679,6 +725,70 @@ static const char *apply(uint32_t job, bool recover)
 
 // ───────── 태스크 ─────────
 
+// 스테이징·적용 명령 1건 처리 (dsp 태스크). 같은 job 의 중복 명령(서버 재전송)은 다시 받거나 굽지 않고 결과를 다시 보고한다
+static void handle_cmd(const cmd_t *c)
+{
+    if (c->type == CMD_QUERY_VER) {
+        query_version();
+        return;
+    }
+    if (!s_part) {
+        report_final(c->job, "fail", -1, NULL, "no_partition");
+        return;
+    }
+    if (c->type == CMD_START) {
+        if (c->job != 0 && s_stage.magic[0] && s_stage.job == c->job) {
+            // 이미 받아 둔 job: 다시 받지 않고 staged 를 다시 보고 (apply:1 이면 아래 적용 단계에서 다시 판단)
+            ESP_LOGW(TAG, "job %lu: duplicate START - already staged", (unsigned long)c->job);
+            report_final(c->job, "staged", 100, s_stage.ver, NULL);
+            if (!c->apply) {
+                return;
+            }
+        } else if (replay_recent(c->job, false)) {
+            return;                             // 받기 실패·적용 완료(스테이징 지워짐) 뒤의 중복
+        } else {
+            if (s_state == ST_PROGRAMMING) {
+                report_final(c->job, "fail", -1, NULL, "busy");
+                return;
+            }
+            s_state = ST_DOWNLOADING;
+            // 위 apply() 와 같은 이유 (ota.c 의 s_busy 와 상호 배제)
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            // 브리지 자체 OTA 가 진행 중이면 받지 않는다 (OTA 뒤 재부팅이 스테이징을 끊음). 상태를 먼저 세운 뒤 확인
+            const char *err = ota_busy() ? "esp_ota_busy" : download(c);
+            if (err) {
+                stage_load();           // 이전 스테이징이 남아 있으면 복원
+                s_state = s_stage.magic[0] ? ST_STAGED : ST_IDLE;
+                report_result(c->job, false, "fail", -1, NULL, err);
+                return;
+            }
+            s_state = ST_STAGED;
+            report_result(c->job, false, "staged", 100, s_stage.ver, NULL);
+            if (!c->apply) {
+                return;
+            }
+        }
+    }
+    // 적용 (DSP_OTA_APPLY, 또는 START apply:1 의 스테이징 뒤)
+    if (replay_recent(c->job, true)) {
+        return;                                 // 같은 job 의 적용이 이미 끝남 (done 뒤 not_staged 로 오판되지 않게)
+    }
+    if (c->type == CMD_APPLY && s_stage.magic[0] && c->job != 0 && c->job != s_stage.job) {
+        report_result(c->job, true, "fail", -1, s_stage.ver, "job_mismatch");
+        return;
+    }
+    uint32_t job = c->type == CMD_APPLY ? s_stage.job : c->job;
+    s_cur_apply = job;
+    report(job, "start", 0, s_stage.ver, NULL);
+    const char *err = apply(job, c->recover);
+    if (err) {
+        report_result(job, true, "fail", -1, s_stage.ver, err);
+    } else {
+        report_result(job, true, "done", 100, s_dsp_ver, NULL);
+    }
+    s_cur_apply = 0;
+}
+
 static void dsp_task(void *arg)
 {
     cmd_t c;
@@ -693,64 +803,29 @@ static void dsp_task(void *arg)
             }
             continue;
         }
-        switch (c.type) {
-        case CMD_QUERY_VER:
-            query_version();
-            break;
-        case CMD_START: {
-            if (!s_part) {
-                report_final(c.job, "fail", -1, NULL, "no_partition");
-                break;
-            }
-            if (s_state == ST_PROGRAMMING) {
-                report_final(c.job, "fail", -1, NULL, "busy");
-                break;
-            }
-            s_state = ST_DOWNLOADING;
-            // 브리지 자체 OTA 가 진행 중이면 받지 않는다 (OTA 뒤 재부팅이 스테이징을 끊음). 상태를 먼저 세운 뒤 확인
-            const char *err = ota_busy() ? "esp_ota_busy" : download(&c);
-            if (err) {
-                stage_load();           // 이전 스테이징이 남아 있으면 복원
-                s_state = s_stage.magic[0] ? ST_STAGED : ST_IDLE;
-                report_final(c.job, "fail", -1, NULL, err);
-                break;
-            }
-            s_state = ST_STAGED;
-            report_final(c.job, "staged", 100, s_stage.ver, NULL);
-            if (!c.apply) {
-                break;
-            }
-        }   /* fallthrough */
-        case CMD_APPLY: {
-            if (!s_part) {
-                report_final(c.job, "fail", -1, NULL, "no_partition");
-                break;
-            }
-            if (c.type == CMD_APPLY && s_stage.magic[0] && c.job != 0 && c.job != s_stage.job) {
-                report_final(c.job, "fail", -1, s_stage.ver, "job_mismatch");
-                break;
-            }
-            uint32_t job = c.type == CMD_APPLY ? s_stage.job : c.job;
-            report(job, "start", 0, s_stage.ver, NULL);
-            const char *err = apply(job, c.recover);
-            if (err) {
-                report_final(job, "fail", -1, s_stage.ver, err);
-            } else {
-                report_final(job, "done", 100, s_dsp_ver, NULL);
-            }
-            break;
+        if (c.type == CMD_START) {
+            s_cur_start = c.job;
         }
-        }
+        handle_cmd(&c);
+        s_cur_start = 0;
     }
 }
 
 // ───────── 서버 명령 ─────────
-// 평면 JSON (dap_json_str·dap_json_u32). 여기서의 거부 보고는 서버 수신 태스크 문맥이라 간격 없이 반복
+// 평면 JSON (dap_json_str·dap_json_u32). 여기서의 거부 보고는 서버 수신 태스크 문맥이라 간격 없이 반복.
+// 중복 명령(서버 재전송, 같은 job) 판단은 dsp 태스크(handle_cmd)가 한다 — 상태·최근 결과를 그 태스크만 쓰므로 경쟁이 없다.
+// 여기서는 처리 중인 job(s_cur_start·s_cur_apply, 32비트 한 번 읽기)과 같을 때만 큐에 넣지 않고 버린다.
+// 읽은 직후 처리가 끝나도 그 명령은 큐로 가서 dsp 태스크가 최근 결과를 다시 보고하므로 어느 쪽이든 결과는 같다
 
 void dsp_ota_start(const char *json, size_t len)
 {
     cmd_t c = { .type = CMD_START };
     c.job = dap_json_u32(json, len, "job");
+    // 같은 job 을 받는 중(이어지는 적용 포함)이면 서버 재전송 — 무시. 그 사이 끝났으면 큐에 들어가고 dsp 태스크가 결과를 다시 보고
+    if (c.job != 0 && c.job == s_cur_start) {
+        ESP_LOGW(TAG, "job %lu: duplicate START ignored (in progress)", (unsigned long)c.job);
+        return;
+    }
     int rc = dap_json_str(json, len, "url", c.url, sizeof(c.url));
     if (rc == DAP_JSON_TOO_LONG) {
         report_final_ex(c.job, "fail", -1, NULL, "url_too_long", false);    // 잘라 쓰면 엉뚱한 파일을 받음
@@ -779,6 +854,10 @@ void dsp_ota_apply(const char *json, size_t len)
 {
     cmd_t c = { .type = CMD_APPLY };
     c.job     = dap_json_u32(json, len, "job");
+    if (c.job != 0 && c.job == s_cur_apply) {     // 같은 job 을 굽는 중 — 서버 재전송, 무시
+        ESP_LOGW(TAG, "job %lu: duplicate APPLY ignored (in progress)", (unsigned long)c.job);
+        return;
+    }
     c.recover = dap_json_u32(json, len, "recover") == 1;
     if (!s_q || xQueueSend(s_q, &c, 0) != pdTRUE) {
         report_final_ex(c.job, "fail", -1, NULL, s_q ? "busy" : "not_ready", false);
