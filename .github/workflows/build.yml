@@ -49,6 +49,7 @@ jobs:
           sudo sed 's#[^ ]*/##' build/flash_args > "$OUT/flash_args"
           sudo cp build/merged-binary.bin "$OUT/agv_wifi_bridge_merged.bin"
           cp tools/flash.bat tools/flash.sh docs/FLASH_GUIDE.md "$OUT/"
+          cp -r docs/images "$OUT/images"   # FLASH_GUIDE.md 의 그림 (images/*.png)
           sudo chown -R "$USER" dist
           cat > "$OUT/README.txt" <<TXT
           AGV Wi-Fi Bridge ${{ steps.ver.outputs.ver }} (ESP32-S3, ESP-IDF v6.1)
