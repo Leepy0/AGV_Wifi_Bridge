@@ -1,13 +1,15 @@
 // AGV Wi-Fi 브리지 벤치 테스트용 UDP 서버 (.NET 10 file-based app)
 // 실행: dotnet run BridgeTest.cs
 // 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | cfg <agv> [명령]
-//       | info <agv> | dspota <agv> stage <dspfw 파일|url> [apply] | dspota <agv> apply | hb | quit
+//       | info <agv> | dspota <agv> stage <dspfw 파일|url> [apply] | dspota <agv> apply [recover] | hb | quit
 //   data 표기: <STX> <ETX> <CR> <LF> \xHH 사용 가능 (공백 유지)
 //   예) send 7 <STX>W1107C001X<ETX>
 //   ota 7 build\agv_wifi_bridge.bin  → 이 PC 가 HTTP(8070) 로 파일을 서비스하고 ESP 에 URL 전달
 //   cfg 7 set ip 192.168.10.107       → 원격 설정 (콘솔과 같은 키). cfg 7 = 현재 설정, cfg 7 save / cfg 7 reboot
 //   dspota 7 stage app.dspfw apply    → 메인보드 펌웨어: 이 PC 가 HTTP 로 파일 서비스, 브리지가 받아 두고(스테이징) 바로 적용
 //   dspota 7 apply                    → 스테이징된 이미지 적용 (AGV 정지 상태에서)
+//   dspota 7 apply recover            → 구조 적용: 기동 불능 앱 복구 (브리지가 HELLO 를 50ms 간격으로 계속 보내는 동안
+//                                       메인보드 전원을 다시 넣으면 부트로더의 부팅 직후 HELLO 창으로 진입)
 //   info 7                            → 장치 정보 (ESP/메인보드 버전, 스테이징 상태)
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -33,7 +35,7 @@ var rxMain = RxLoop(mainSock, cts.Token);
 var rxRfid = RxLoop(rfidSock, cts.Token);
 
 Log($"listening udp {MainPort} (main/status/pong), {RfidPort} (rfid)");
-Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <file|url> [apply] | dspota <agv> apply | hb | quit");
+Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover] | hb | quit");
 
 while (Console.ReadLine() is { } line)
 {
@@ -114,13 +116,15 @@ while (Console.ReadLine() is { } line)
 
         case "dspota" when p.Length >= 3 && TryGetAgv(p[1], out var ag):
         {
-            // dspota <agv> stage <file|url> [apply] | dspota <agv> apply
+            // dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover]
             var sub = p[2].Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
             var job = ++dspJob;
             string json;
             if (sub[0] == "apply")
             {
-                json = $"{{\"job\":{job}}}";
+                var recover = sub.Length >= 2 && sub[1] == "recover";
+                json = recover ? $"{{\"job\":{job},\"recover\":1}}" : $"{{\"job\":{job}}}";
+                if (recover) Log($"[{ag.Id:D2}] 구조 적용: 브리지가 HELLO 를 반복 송신하는 동안 메인보드 전원을 껐다 켜세요");
                 var pkt = Proto.Build(Proto.DspOtaApply, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
                 mainSock.Send(pkt, pkt.Length, ag.Ep);
                 Log($"[{ag.Id:D2}] DSP_OTA_APPLY {json}");
@@ -151,7 +155,7 @@ while (Console.ReadLine() is { } line)
             }
             else
             {
-                Log("usage: dspota <agv> stage <file|url> [apply] | dspota <agv> apply");
+                Log("usage: dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover]");
             }
             break;
         }

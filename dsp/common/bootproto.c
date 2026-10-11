@@ -37,7 +37,10 @@ void bp_init(bp_ctx_t *c, const bp_ops_t *ops)
     c->reset_mode = 0;
     c->last_seq = 0xFFFF;
     c->last_cmd = 0;
+    c->last_len = 0;
+    c->last_crc = 0;
     c->last_tx_len = 0;
+    c->accept_cmd = 0;
 }
 
 static uint32_t get_u32(const uint16_t *b)
@@ -92,6 +95,16 @@ int bp_app_check(const bp_ops_t *ops, dspimg_hdr_t *hdr, uint32_t *crc_out)
 static int in_app(uint32_t addr, uint32_t n)
 {
     return addr >= DSPIMG_APP_HDR_ADDR && n > 0 && addr + n <= DSPIMG_APP_END && addr + n > addr;
+}
+
+// READ 허용 범위(플래시·OTP) 안의 [addr, addr+n) 인지
+static int in_readable(uint32_t addr, uint32_t n)
+{
+    if (n == 0 || addr + n < addr) {
+        return 0;
+    }
+    return (addr >= BP_READ_FLASH_START && addr + n <= BP_READ_FLASH_END) ||
+           (addr >= BP_READ_OTP_START && addr + n <= BP_READ_OTP_END);
 }
 
 // 요청 처리 → 응답 payload 를 resp 에, 길이 반환
@@ -183,6 +196,10 @@ static uint16_t handle(bp_ctx_t *c, uint16_t cmd, const uint16_t *pl, uint16_t n
             resp[0] = BP_ST_BAD_LEN;
             return 1;
         }
+        if (!in_readable(addr, nw)) {
+            resp[0] = BP_ST_BAD_ADDR;
+            return 1;
+        }
         {
             static uint16_t words[BP_BLOCK_WORDS];
             ops->read(addr, words, nw);
@@ -252,8 +269,13 @@ int bp_rx_byte(bp_ctx_t *c, uint16_t b)
         }
         cmd = c->rx[0];
         seq = c->rx[1];
-        if (seq == c->last_seq && cmd == c->last_cmd && c->last_tx_len > 0) {
-            // 응답 유실로 인한 재전송 → 같은 응답 반복 (플래시를 두 번 쓰지 않음)
+        if (c->accept_cmd != 0 && cmd != c->accept_cmd) {
+            return 0;               // 지금 받지 않는 명령 (HELLO 창의 ERASE 등): 무응답
+        }
+        if (seq == c->last_seq && cmd == c->last_cmd && c->len == c->last_len && crc == c->last_crc &&
+            c->last_tx_len > 0) {
+            // 응답 유실로 인한 재전송 → 같은 응답 반복 (플래시를 두 번 쓰지 않음).
+            // payload 가 다르면(새로 실행한 도구가 seq 를 다시 1 부터 쓰는 경우 등) 새 요청으로 처리한다
             uint16_t i;
             for (i = 0; i < c->last_tx_len; i++) c->tx[i] = c->last_tx[i];
             c->tx_len = c->last_tx_len;
@@ -266,6 +288,8 @@ int bp_rx_byte(bp_ctx_t *c, uint16_t b)
             c->tx_len = bp_build(c->tx, cmd | BP_RESP, seq, resp, rn);
             c->last_seq = seq;
             c->last_cmd = cmd;
+            c->last_len = c->len;
+            c->last_crc = crc;
             for (i = 0; i < c->tx_len; i++) c->last_tx[i] = c->tx[i];
             c->last_tx_len = c->tx_len;
         }

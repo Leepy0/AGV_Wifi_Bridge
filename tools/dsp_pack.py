@@ -15,6 +15,7 @@ hex2000 Intel HEX 는 --memwidth=16 --romwidth=16 일 때 주소가 워드 단�
 상위 바이트 → 하위 바이트 순으로 기록된다 (실측). 바이트 주소(0x7D0000 대)로 나오면 거부한다.
 """
 import argparse
+import re
 import struct
 import sys
 import time
@@ -29,6 +30,10 @@ VER_WORDS      = 32
 BLOCK_WORDS    = 128
 FILE_MAGIC     = b"AGVDSP1\0"
 FILE_HDR_LEN   = 32
+# 버전 문자열 규칙: 앱 R 응답의 버전 칸이 8자 고정(app_fwupdate.c)이고 브리지·서버가 그 값을 이미지 버전과 비교하므로
+# 8자를 넘으면 굽기는 성공해도 서버가 '버전 다름'으로 실패 처리한다. 빈 문자열·공백도 막는다.
+VER_RE         = re.compile(r"[0-9A-Za-z._-]{1,8}")
+VER_RULE       = "영문·숫자·. _ - 로 1~8자 (예: 1.2.3)"
 
 
 # ───────── CRC (dsp_image.c 와 동일 규칙: 워드마다 하위 바이트 → 상위 바이트) ─────────
@@ -113,9 +118,14 @@ def parse_intel_hex(path: str) -> dict:
 
 # ───────── 이미지 ─────────
 
+def check_ver(ver: str) -> str:
+    if not isinstance(ver, str) or VER_RE.fullmatch(ver) is None:
+        raise ValueError(f"버전 문자열 {ver!r} 은 쓸 수 없음 — {VER_RULE}")
+    return ver
+
+
 def build_header(app_len: int, app_crc: int, build_time: int, ver: str, flags: int = 0) -> list:
-    if len(ver.encode("ascii")) > VER_WORDS - 1:
-        raise ValueError("버전 문자열은 31자 이하")
+    check_ver(ver)
     hdr = [0xFFFF] * HDR_WORDS
     hdr[0], hdr[1], hdr[2], hdr[3] = MAGIC0, MAGIC1, HDR_VER, flags
     hdr[4], hdr[5] = app_len & 0xFFFF, app_len >> 16
@@ -146,6 +156,7 @@ def parse_header(hdr: list) -> dict:
 
 
 def pack(mem: dict, ver: str, build_time: int) -> bytes:
+    check_ver(ver)
     bad = [a for a in mem if not (APP_HDR_ADDR <= a < APP_END)]
     if bad:
         raise ValueError(f"앱 영역(0x{APP_HDR_ADDR:X}~0x{APP_END - 1:X}) 밖의 데이터 {len(bad)}워드: 0x{min(bad):X}... "
@@ -266,6 +277,26 @@ def cmd_selftest(a):
         except ValueError as e:
             assert "바이트 주소" in str(e), e
     print("intel hex parse ok (word addresses accepted, byte addresses rejected)")
+    # 버전 문자열 규칙 (8자 고정 R 응답 칸에 들어가야 서버 비교가 맞음)
+    for good in ("1.2.3", "12345678", "v1_0-rc", "A"):
+        check_ver(good)
+        build_header(1, 0, 0, good)
+    for bad in ("", "1.2.3-rc1", "1.2 3", " 1.2", "1.2.3\t", "버전", "1/2", "1.2.3\n"):
+        try:
+            build_header(1, 0, 0, bad)
+            raise AssertionError(f"버전 {bad!r} 을 거부해야 함")
+        except ValueError as e:
+            assert "버전 문자열" in str(e), e
+    mem1 = {APP_CODE_ADDR: 0x1234}
+    try:
+        pack(mem1, "1.2.3-rc1", 0)
+        raise AssertionError("pack 이 9자 버전을 거부해야 함")
+    except ValueError:
+        pass
+    img = pack(mem1, "1.2.3", 1700000000)
+    info = unpack(img)
+    assert info["ver"] == "1.2.3" and info["app_len"] == 1 and img[16:24] == b"1.2.3\0\0\0", info
+    print("version rule ok (1~8 chars of [0-9A-Za-z._-])")
     print("selftest ok")
 
 
@@ -275,13 +306,13 @@ def main():
     q = sp.add_parser("pack", help="Intel HEX → .dspfw")
     q.add_argument("hexfile")
     q.add_argument("-o", "--output", required=True)
-    q.add_argument("--ver", required=True, help="앱 버전 문자열 (31자 이하)")
+    q.add_argument("--ver", required=True, help=f"앱 버전 문자열: {VER_RULE}. R 응답 버전 칸이 8자라 더 길면 서버 비교 실패")
     q.add_argument("--build", help="빌드 시각 unix 초 (기본: 지금)")
     q.set_defaults(fn=cmd_pack)
     q = sp.add_parser("info", help=".dspfw 내용 표시·검증")
     q.add_argument("file")
     q.set_defaults(fn=cmd_info)
-    q = sp.add_parser("selftest", help="CRC 테스트 벡터")
+    q = sp.add_parser("selftest", help="CRC 테스트 벡터·HEX 파서·버전 규칙 검사")
     q.set_defaults(fn=cmd_selftest)
     a = p.parse_args()
     try:

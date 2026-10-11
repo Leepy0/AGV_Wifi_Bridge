@@ -62,32 +62,75 @@ void hw_init_flash(void)
     asm(" RPT #7 || NOP");              // 파이프라인 정리
 }
 
+// hw_sci_init 이 바꾸는 핀 설정 (앱 점프 전 hw_sci_deinit 이 되돌림)
+static uint16_t s_gpapud_h, s_gpaqsel2_h, s_gpamux2_h;
+
 void hw_sci_init(void)
 {
     EALLOW();
+    s_gpapud_h   = GPAPUD_H;
+    s_gpaqsel2_h = GPAQSEL2_H;
+    s_gpamux2_h  = GPAMUX2_H;
     GPAPUD_H   &= (uint16_t)~0x3000;    // GPIO28/29 풀업
     GPAQSEL2_H |= 0x0300;               // GPIO28 비동기 입력
     GPAMUX2_H   = (uint16_t)((GPAMUX2_H & ~0x0F00) | 0x0500);   // GPIO28 = SCIRXDA, GPIO29 = SCITXDA
     EDIS();
 
     SCICCR   = 0x0007;                  // 8비트, 1 스톱, 패리티 없음
-    SCICTL1  = 0x0003;                  // RX/TX 켬, 리셋 상태
+    SCICTL1  = SCICTL1_HOLD;            // RX/TX 켬, 리셋 상태
     SCICTL2  = 0x0000;
     SCIHBAUD = (uint16_t)(SCI_BRR >> 8);
     SCILBAUD = (uint16_t)(SCI_BRR & 0xFF);
     SCIFFTX  = 0xE040;                  // FIFO 켬, TX FIFO 리셋 해제
     SCIFFRX  = 0x2040 | SCIFFRX_RXFFOVRCLR;   // RX FIFO 리셋 해제, 오버플로 클리어
     SCIFFCT  = 0x0000;
-    SCICTL1  = 0x0023;                  // SWRESET 해제
+    SCICTL1  = SCICTL1_RUN;             // SWRESET 해제
+}
+
+void hw_sci_deinit(void)
+{
+    hw_sci_flush();                     // 보내던 응답은 끝까지
+    SCICTL1  = 0x0000;                  // SW RESET 유지, RX/TX 끔 (이하 SPRU051 리셋 기본값)
+    SCIFFTX  = SCIFFTX_RESETVAL;
+    SCIFFRX  = SCIFFRX_RESETVAL | SCIFFRX_RXFFOVRCLR;
+    SCIFFCT  = 0x0000;
+    SCICTL2  = 0x0000;
+    SCIHBAUD = 0x0000;
+    SCILBAUD = 0x0000;
+    SCICCR   = 0x0000;
+    EALLOW();
+    GPAMUX2_H  = s_gpamux2_h;
+    GPAQSEL2_H = s_gpaqsel2_h;
+    GPAPUD_H   = s_gpapud_h;
+    EDIS();
+}
+
+// SCI 소프트 리셋 + RX FIFO 리셋 (SPRU051: RXERROR·BRKDT 는 SCICTL1.SW RESET 을 0→1 토글해야 풀리고,
+// 그 전까지는 수신이 멈춘다). 보내던 응답이 잘리지 않게 송신이 끝난 뒤 리셋한다.
+static void sci_rx_recover(void)
+{
+    while ((SCIFFTX & SCIFFTX_TXFFST_MASK) != 0) {
+    }
+    while ((SCICTL2 & SCICTL2_TXEMPTY) == 0) {
+    }
+    SCICTL1 = SCICTL1_HOLD;
+    SCICTL1 = SCICTL1_RUN;
+    SCIFFRX &= (uint16_t)~SCIFFRX_RXFIFORESET;
+    SCIFFRX |= SCIFFRX_RXFIFORESET | SCIFFRX_RXFFOVRCLR;
 }
 
 int hw_sci_getc(void)
 {
+    if (SCIRXST & SCIRXST_RXERROR) {
+        // 브레이크(브리지 재부팅·커넥터 흔들림으로 RX 가 1ms 넘게 low)·프레이밍 오류: 풀지 않으면 HELLO 를 영영 못 받는다
+        sci_rx_recover();
+        return HW_SCI_RXERR;
+    }
     if (SCIFFRX & SCIFFRX_RXFFOVF) {
         SCIFFRX |= SCIFFRX_RXFFOVRCLR;  // 넘침: 이후 패킷은 CRC 로 걸러짐
     }
     if ((SCIFFRX & SCIFFRX_RXFFST_MASK) == 0) {
-        return -1;
+        return HW_SCI_NONE;
     }
     return (int)(SCIRXBUF & 0x00FF);
 }
@@ -108,28 +151,34 @@ void hw_sci_flush(void)
     delay_loop(2000);                   // 마지막 스톱 비트 여유
 }
 
+// 1µs 단위로 분주 (TDDR = SYSCLK/1MHz - 1) — 600초 유휴 시한도 32비트 안에서 잰다
 void hw_timer_start(void)
 {
     TIMER0TCR  = TIMER0TCR_TSS;         // 정지
+    TIMER0TPR  = (uint16_t)(SYSCLK_HZ / 1000000UL - 1UL);
+    TIMER0TPRH = 0;
+    TIMER0PRD  = 0xFFFFFFFFUL;
+    TIMER0TCR  = TIMER0TCR_TSS | TIMER0TCR_TRB | TIMER0TCR_TIF;   // 리로드(카운터·분주기), 플래그 클리어
+    TIMER0TCR &= (uint16_t)~(TIMER0TCR_TSS | TIMER0TCR_TIF);     // 시작 (TIF 는 1 쓰면 지워지므로 다시 쓰지 않음)
+}
+
+uint32_t hw_timer_us(void)
+{
+    uint32_t now = TIMER0TIM;
+    if (TIMER0TCR & TIMER0TCR_TIF) {
+        return 0xFFFFFFFFUL;            // 한 바퀴(약 71분) 지남
+    }
+    return 0xFFFFFFFFUL - now;
+}
+
+void hw_timer_deinit(void)
+{
+    TIMER0TCR  = TIMER0TCR_TSS;
     TIMER0TPR  = 0;
     TIMER0TPRH = 0;
     TIMER0PRD  = 0xFFFFFFFFUL;
-    TIMER0TCR  = TIMER0TCR_TRB | TIMER0TCR_TIF;   // 리로드, 플래그 클리어
-    TIMER0TCR &= (uint16_t)~TIMER0TCR_TSS;        // 시작
-}
-
-uint32_t hw_timer_now(void)
-{
-    return TIMER0TIM;
-}
-
-int hw_timer_wrapped(void)
-{
-    if (TIMER0TCR & TIMER0TCR_TIF) {
-        TIMER0TCR |= TIMER0TCR_TIF;
-        return 1;
-    }
-    return 0;
+    TIMER0TCR  = TIMER0TCR_TSS | TIMER0TCR_TRB | TIMER0TCR_TIF;
+    TIMER0TCR &= (uint16_t)~(TIMER0TCR_TSS | TIMER0TCR_TIF);     // 리셋 상태처럼 분주 없이 실행
 }
 
 void hw_reset(void)
