@@ -59,9 +59,12 @@ menu "AGV Wi-Fi Bridge"
             default 9600
 
         config BR_HB_MS
-            int "Heartbeat period ms (0 = off)"
-            range 0 60000
+            int "Heartbeat period ms (0 = off, 100-2000)"
+            range 0 2000
             default 1000
+            help
+                0(끔, 디버그용) 또는 100~2000ms. 서버의 오프라인 판정(5초)·OTA 확정 대기(15초)가
+                1초 주기를 전제로 하므로 2000ms 를 넘길 수 없음. 1~99 는 빌드 오류.
 
     endmenu
 

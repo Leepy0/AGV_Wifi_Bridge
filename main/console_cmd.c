@@ -26,7 +26,7 @@ static int cmd_set(int argc, char **argv)
     if (argc != 3) {
         printf("usage: set <key> <value>\n"
                "keys : agv ssid pass(- = none) ip(dhcp) mask gw server server_port local_port\n"
-               "       rfid_dst(off / 255.255.255.255) rfid_port main_baud rfid_baud hb_ms(0 = off)\n");
+               "       rfid_dst(off / 255.255.255.255) rfid_port main_baud rfid_baud hb_ms(0 = off, 100-2000)\n");
         return 1;
     }
     if (!cfg_set(argv[1], argv[2])) {
@@ -61,6 +61,10 @@ static int cmd_defaults(int argc, char **argv)
 
 static int cmd_reboot(int argc, char **argv)
 {
+    if (dsp_ota_busy()) {
+        printf("busy: mainboard programming - reboot refused, retry when done\n");
+        return 1;
+    }
     esp_restart();
     return 0;
 }
@@ -99,7 +103,9 @@ static int cmd_ota(int argc, char **argv)
     } else if (argc == 2) {
         esp_err_t err = ota_start(argv[1]);
         if (err != ESP_OK) {
-            printf("ota start failed: %s\n", esp_err_to_name(err));
+            // INVALID_ARG: URL 형식 또는 호스트가 설정된 서버 IP 가 아님 / INVALID_STATE: OTA·메인보드 작업 중
+            printf("ota start failed: %s (url host must be the configured server IP; refused while mainboard is busy)\n",
+                   esp_err_to_name(err));
             return 1;
         }
         printf("ota started - progress is sent to server, reboot on success\n");

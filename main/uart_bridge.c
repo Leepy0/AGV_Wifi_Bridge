@@ -9,6 +9,7 @@
 #include "sdkconfig.h"
 #include "app_config.h"
 #include "uart_bridge.h"
+#include "bootproto.h"
 
 static const char *TAG = "uart";
 
@@ -29,6 +30,11 @@ static const char *TAG = "uart";
 #define RX_TASK_PRIO   12
 #define TX_TASK_PRIO   13
 #define BRIDGE_CORE    1        // Wi-Fi/lwIP 는 core 0
+#define RAW_TX_DONE_MS 200      // 원시 모드 전환 전 송신 완료 대기
+
+#ifdef BP_BAUD
+_Static_assert(BP_BAUD == UART_BRIDGE_BOOT_BAUD, "bootloader baud mismatch (bootproto.h vs uart_bridge.h)");
+#endif
 
 typedef struct {
     uart_port_t   uart;
@@ -282,18 +288,31 @@ esp_err_t uart_bridge_raw_begin(void)
     }
     s_raw = true;
     xQueueReset(s_main_txq);                                // 대기 중 프레임 폐기
-    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(200));       // 송신 중인 프레임 완료
+    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(RAW_TX_DONE_MS));   // 송신 중인 프레임 완료
+    // 부트로더는 SCI 속도가 고정(115200) — 앱 링크 속도(main_baud)를 바꿔 운용하는 호기도 부트로더와 통신되게
+    esp_err_t err = uart_set_baudrate(MAIN_UART, UART_BRIDGE_BOOT_BAUD);
     uart_flush_input(MAIN_UART);
-    ESP_LOGW(TAG, "main UART raw mode on (bridge paused)");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set bootloader baud failed: %s", esp_err_to_name(err));
+        uart_bridge_raw_end();
+        return err;
+    }
+    ESP_LOGW(TAG, "main UART raw mode on (bridge paused, %lu bps)", (unsigned long)UART_BRIDGE_BOOT_BAUD);
     return ESP_OK;
 }
 
 void uart_bridge_raw_end(void)
 {
+    // 마지막 부트로더 패킷(RESET 등)이 다 나간 뒤 앱 속도로 되돌림 — TX 버퍼 0 이라 write 는 FIFO 적재까지만 기다림
+    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(RAW_TX_DONE_MS));
+    esp_err_t err = uart_set_baudrate(MAIN_UART, g_cfg.main_baud);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "restore baud %lu failed: %s", (unsigned long)g_cfg.main_baud, esp_err_to_name(err));
+    }
     uart_flush_input(MAIN_UART);
     xQueueReset(s_port[PORT_MAIN].evq);
     s_raw = false;
-    ESP_LOGI(TAG, "main UART raw mode off");
+    ESP_LOGI(TAG, "main UART raw mode off (%lu bps)", (unsigned long)g_cfg.main_baud);
 }
 
 int uart_bridge_raw_read(uint8_t *buf, size_t n, uint32_t timeout_ms)

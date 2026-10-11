@@ -37,7 +37,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         if (key == NULL || val == NULL || *val == '\0') {
             return clamp(snprintf(out, cap, "usage: set <key> <value>\n"
                                   "keys : agv ssid pass(- = none) ip(dhcp) mask gw server server_port local_port\n"
-                                  "       rfid_dst(off / 255.255.255.255) rfid_port main_baud rfid_baud hb_ms(0 = off)\n"), cap);
+                                  "       rfid_dst(off / 255.255.255.255) rfid_port main_baud rfid_baud hb_ms(0 = off, 100-2000)\n"), cap);
         }
         if (cfg_set(key, val)) {
             return clamp(snprintf(out, cap, "ok %s - 'save' then 'reboot' to apply\n", key), cap);
@@ -50,7 +50,8 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
             return clamp(snprintf(out, cap, "save failed: %s\n", esp_err_to_name(err)), cap);
         }
         return clamp(snprintf(out, cap, src == CMD_SRC_SERVER
-                              ? "saved - 'reboot' to apply (reverts if no server contact after reboot)\n"
+                              ? "saved (trial) - 'reboot' to apply. After reboot the bridge needs a server packet within 180 s "
+                                "or it restores the previous config (gateway 0.3.0+ pings automatically)\n"
                               : "saved - 'reboot' to apply\n"), cap);
     }
     if (strcmp(cmd, "defaults") == 0 && src == CMD_SRC_LOCAL) {
@@ -60,6 +61,10 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
                      : snprintf(out, cap, "erase failed: %s\n", esp_err_to_name(err)), cap);
     }
     if (strcmp(cmd, "reboot") == 0) {
+        if (dsp_ota_busy()) {
+            // 메인보드를 지운 뒤 재부팅하면 앱 없이 부트로더에 남는다 — 굽기가 끝난 뒤 다시
+            return clamp(snprintf(out, cap, "busy: mainboard programming - reboot refused, retry when done\n"), cap);
+        }
         *act = CMD_ACT_REBOOT;
         return clamp(snprintf(out, cap, "rebooting\n"), cap);
     }
