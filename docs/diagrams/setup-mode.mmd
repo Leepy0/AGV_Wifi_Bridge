@@ -6,15 +6,16 @@ flowchart LR
   ON(["<b>설정 모드</b> · BLE 켜짐<br/>이름 AGVBR-호기-MAC 끝 4자리<br/>login agvsetup"])
   ON --> c1["setup off"]
   ON --> c2["휴대폰 연결 없이<br/>Wi-Fi 연결 상태로 5분"]
-  ON --> c3["전원 재투입 · 콘솔이나<br/>서버의 reboot<br/>(저장된 설정이 있을 때)"]
+  ON --> c3["전원 재투입 · 콘솔이나<br/>서버의 reboot<br/>(저장된 설정이 있을 때<br/>메인보드 굽는 중엔 거부)"]
   c1 --> OFF
   c2 --> OFF
   c3 --> OFF
   OFF(["<b>닫힘</b> · BLE 완전히 꺼짐<br/>Wi-Fi 가 무선부 단독 사용"])
   ON -.- N["Wi-Fi 미연결이면<br/>5분이 지나도 닫지 않음"]
+  ON -.- L["같은 연결에서 login<br/>5회 연속 실패하면<br/>BLE 연결을 끊음<br/>(다시 접속해 재시도)"]
   classDef on fill:#dcfce7,stroke:#16a34a,color:#0f172a
   classDef off fill:#f1f5f9,stroke:#64748b,color:#0f172a
   classDef note fill:#fef3c7,stroke:#d97706,color:#0f172a
   class ON on
   class OFF off
-  class N note
+  class N,L note
