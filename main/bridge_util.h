@@ -43,15 +43,26 @@ static inline bool bu_parse_ipv4(const char *s, size_t n, uint32_t *out_be)
     return true;
 }
 
+// s 가 소문자 접두어 pre 로 시작하는지 (대소문자 무시 — URL 스킴은 대소문자를 가리지 않음)
+static inline bool bu_prefix_ci(const char *s, const char *pre)
+{
+    for (; *pre; s++, pre++) {
+        char c = *s;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != *pre) return false;
+    }
+    return true;
+}
+
 // URL 이 http(s)://<서버 IP>[:포트][/...] 꼴이고 호스트가 server_ip_be(네트워크 바이트 순서)와 같은지.
 // 호스트 부분은 숫자·점·콜론만 허용 — 사용자 정보(a@b), 호스트 이름, IPv6, 역슬래시 등 파서마다 해석이 다른 꼴은 모두 거부
 static inline bool bu_url_host_is(const char *url, uint32_t server_ip_be)
 {
     const char *p;
     if (url == NULL || server_ip_be == 0) return false;
-    if (strncmp(url, "http://", 7) == 0) {
+    if (bu_prefix_ci(url, "http://")) {
         p = url + 7;
-    } else if (strncmp(url, "https://", 8) == 0) {
+    } else if (bu_prefix_ci(url, "https://")) {
         p = url + 8;
     } else {
         return false;

@@ -20,6 +20,7 @@ void      dsp_ota_query_version(void);                  // 앱에 버전 조회 
 // 메인보드 수신 프레임 관찰: PAN ID 학습, R 응답 소비. true = 소비함(서버로 올리지 않음)
 bool      dsp_ota_observe(const uint8_t *frame, size_t len);
 bool      dsp_ota_busy(void);                           // 프로그래밍 중 (ESP OTA 거부용)
+bool      dsp_ota_staging(void);                        // 스테이징(다운로드) 중 (ESP OTA 거부용)
 // 상태 JSON 조각: "dsp":"..","dspb":"..","dsp_build":"..","dsp_st":"..","staged":{..}  (앞뒤 중괄호·쉼표 없음)
 size_t    dsp_ota_status_json(char *buf, size_t cap);
 size_t    dsp_ota_format(char *buf, size_t cap);        // 콘솔 stat 용 한 줄

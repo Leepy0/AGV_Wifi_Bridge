@@ -27,11 +27,7 @@ bool net_send_ota_result(const uint8_t *data, size_t len)
 static bool s_dsp_prog;
 static const char *s_dsp_st = "idle";
 bool dsp_ota_busy(void) { return s_dsp_prog; }
-size_t dsp_ota_status_json(char *buf, size_t cap)
-{
-    int n = snprintf(buf, cap, "\"dsp\":\"1.0\",\"dspb\":\"1.0\",\"dsp_build\":\"x\",\"dsp_st\":\"%s\",\"staged\":null", s_dsp_st);
-    return (size_t)n < cap ? (size_t)n : cap - 1;
-}
+bool dsp_ota_staging(void) { return strcmp(s_dsp_st, "downloading") == 0; }
 
 const char *esp_err_to_name(esp_err_t e) { return e == ESP_OK ? "ESP_OK" : "ESP_ERR"; }
 void vTaskDelay(TickType_t t) { (void)t; }

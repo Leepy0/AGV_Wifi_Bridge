@@ -245,14 +245,14 @@ static void test_read_ranges(void)
     CHECK_EQ(resp[0], BP_ST_BAD_ADDR);
     // RAM, 플래시 앞·뒤에 걸침, OTP 끝에 걸침, 주소 넘침
     const uint32_t bad[][2] = { { 0x000000, 4 }, { 0x3E7FFF, 2 }, { 0x3F7FFF, 2 }, { 0x3D7BFF, 2 },
-                                { 0xFFFFFFFFUL, 2 }, { 0x3F8000, 1 } };
+                                { 0xFFFFFFFFUL, 2 }, { 0x3F8000, 1 }, { 0x3F7FF8, 1 }, { 0x3F7F80, 128 } };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         CHECK_EQ(xfer(BP_CMD_READ, seq++, pl, read_pl(pl, bad[i][0], (uint16_t)bad[i][1]), resp), 1);
         CHECK_EQ(resp[0], BP_ST_BAD_ADDR);
     }
     CHECK_EQ(g_bad_reads, 0);
-    // 허용: 앱, 섹터 A 끝(부트로더 정보·CSM), OTP
-    const uint32_t good[][2] = { { 0x3E8000, 128 }, { 0x3F7F00, 64 }, { 0x3F7F80, 128 }, { 0x3D7800, 16 }, { 0x3D7BF0, 16 } };
+    // 허용: 앱, 섹터 A 끝(부트로더 정보, CSM 비밀번호 앞까지), OTP
+    const uint32_t good[][2] = { { 0x3E8000, 128 }, { 0x3F7F00, 64 }, { 0x3F7F80, 120 }, { 0x3D7800, 16 }, { 0x3D7BF0, 16 } };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         int r = xfer(BP_CMD_READ, seq++, pl, read_pl(pl, good[i][0], (uint16_t)good[i][1]), resp);
         CHECK_EQ(r, 1 + good[i][1] * 2);

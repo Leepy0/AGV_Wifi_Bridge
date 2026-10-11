@@ -42,6 +42,9 @@ jobs:
           gcc --version | head -1
           python3 --version
           bash tests/host/run.sh
+          # 브리지 메인보드 OTA 흐름(dsp_ota.c 시뮬레이션)·검사 도우미, 공통 유틸·자체 OTA 시작·명령 처리
+          sh tests/dsp_ota_host/run.sh
+          make -C tests/bridge_util
 
   build:
     needs: host-test

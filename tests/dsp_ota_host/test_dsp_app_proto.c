@@ -205,6 +205,7 @@ static void test_url(void)
     CHECK(!dap_url_host_is("http://gateway.local:8080/fw", ip));
     CHECK(!dap_url_host_is("ftp://192.168.0.10/fw", ip));
     CHECK(!dap_url_host_is("http://192.168.000.0010/fw", ip));
+    CHECK(!dap_url_host_is("http://192.168.0.010/fw", ip));
     CHECK(!dap_url_host_is("http://192.168.0.10:/fw", ip));
     CHECK(!dap_url_host_is("http://192.168.0.10:80x/fw", ip));
     CHECK(!dap_url_host_is(NULL, ip));

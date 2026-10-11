@@ -631,15 +631,18 @@ static const char *apply(uint32_t job, bool recover)
     if (!s_stage.magic[0]) {
         return "not_staged";
     }
+    // 상태를 먼저 세운 뒤 ESP OTA 를 본다 — ota_start 도 s_busy 를 먼저 세운 뒤 이쪽 상태를 보므로 동시에 시작해도 한쪽은 물러난다
+    s_state = ST_PROGRAMMING;
     if (ota_busy()) {
+        s_state = ST_STAGED;
         return "esp_ota_busy";
     }
     // 메인보드를 지우기 전에 스테이징 이미지를 다시 검사 (파일 CRC·버전 규칙·블록 구조·복원 CRC)
     const char *err = stage_check(s_stage.file_len, &fcrc, apphdr, &ah, newver);
     if (err) {
+        s_state = ST_STAGED;
         return strcmp(err, "image_crc") == 0 ? "stage_invalid" : err;
     }
-    s_state = ST_PROGRAMMING;
     bool erased = false;
     err = program(job, apphdr, &ah, true, recover, &erased);
     // 지운 뒤 실패: 부트로더가 업데이트 모드에 머물러 있으므로 U 없이 HELLO 부터 다시 (메인보드에 앱이 없는 채로 끝내지 않게)
@@ -704,7 +707,8 @@ static void dsp_task(void *arg)
                 break;
             }
             s_state = ST_DOWNLOADING;
-            const char *err = download(&c);
+            // 브리지 자체 OTA 가 진행 중이면 받지 않는다 (OTA 뒤 재부팅이 스테이징을 끊음). 상태를 먼저 세운 뒤 확인
+            const char *err = ota_busy() ? "esp_ota_busy" : download(&c);
             if (err) {
                 stage_load();           // 이전 스테이징이 남아 있으면 복원
                 s_state = s_stage.magic[0] ? ST_STAGED : ST_IDLE;
@@ -792,6 +796,11 @@ void dsp_ota_query_version(void)
 bool dsp_ota_busy(void)
 {
     return s_state == ST_PROGRAMMING;
+}
+
+bool dsp_ota_staging(void)
+{
+    return s_state == ST_DOWNLOADING;
 }
 
 size_t dsp_ota_status_json(char *buf, size_t cap)

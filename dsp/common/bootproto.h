@@ -39,7 +39,7 @@
 
 // READ(진단) 허용 범위 (워드 주소, 끝은 exclusive) — 주변장치 레지스터(예: SCIRXBUF)를 읽어 부수효과가 생기지 않게
 #define BP_READ_FLASH_START 0x3E8000UL      // 플래시 전체: 앱(섹터 D~B) + 부트로더(섹터 A)
-#define BP_READ_FLASH_END   0x3F8000UL
+#define BP_READ_FLASH_END   0x3F7FF8UL      // 섹터 A 끝의 CSM 비밀번호(0x3F7FF8~0x3F7FFF)는 J4 로 읽히지 않게 제외
 #define BP_READ_OTP_START   0x3D7800UL      // OTP 1K 워드
 #define BP_READ_OTP_END     0x3D7C00UL
 

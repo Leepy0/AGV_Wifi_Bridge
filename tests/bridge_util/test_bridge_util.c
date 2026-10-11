@@ -72,7 +72,7 @@ static void test_url_host(void)
     CHECK(!bu_url_host_is("http://192.168.0.10:80:90/a.bin", srv));
     CHECK(!bu_url_host_is("http://192.168.0.10%2f/a.bin", srv));
     // 스킴
-    CHECK(!bu_url_host_is("HTTP://192.168.0.10/a.bin", srv));
+    CHECK(bu_url_host_is("HTTP://192.168.0.10/a.bin", srv));
     CHECK(!bu_url_host_is("ftp://192.168.0.10/a.bin", srv));
     CHECK(!bu_url_host_is("file:///a.bin", srv));
     CHECK(!bu_url_host_is("httpx://192.168.0.10/a.bin", srv));

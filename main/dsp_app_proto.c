@@ -1,6 +1,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "dsp_app_proto.h"
+#include "bridge_util.h"
 #include "dsp_image.h"
 #include "bootproto.h"
 
@@ -223,55 +224,12 @@ uint32_t dap_json_u32(const char *json, size_t len, const char *key)
     return v;
 }
 
-static bool prefix_ci(const char *s, const char *pre, size_t *n)
-{
-    size_t i = 0;
-    for (; pre[i]; i++) {
-        char c = s[i];
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != pre[i]) {
-            return false;
-        }
-    }
-    *n = i;
-    return true;
-}
-
+// 브리지 자체 OTA(ota.c)와 같은 검사기를 쓴다 — 호스트는 10진 IPv4 만, 사용자 정보·호스트명·IPv6 거부
 bool dap_url_host_is(const char *url, const uint8_t ip[4])
 {
-    size_t skip;
-    if (!url || !(prefix_ci(url, "http://", &skip) || prefix_ci(url, "https://", &skip))) {
-        return false;
-    }
-    const char *p = url + skip;
-    // 호스트: 점 4개짜리 십진수 (각 1~3자리, 0~255)
-    for (int i = 0; i < 4; i++) {
-        unsigned v = 0;
-        int d = 0;
-        while (*p >= '0' && *p <= '9' && d < 4) {
-            v = v * 10 + (unsigned)(*p - '0');
-            p++;
-            d++;
-        }
-        if (d == 0 || d > 3 || v > 255 || v != ip[i]) {
-            return false;
-        }
-        if (i < 3) {
-            if (*p != '.') {
-                return false;
-            }
-            p++;
-        }
-    }
-    // 선택 포트, 그 뒤는 경로·질의·끝만 (사용자 정보 '@' 나 호스트명 꼬리 거부)
-    if (*p == ':') {
-        int d = 0;
-        for (p++; *p >= '0' && *p <= '9'; p++) d++;
-        if (d == 0 || d > 5) {
-            return false;
-        }
-    }
-    return *p == '\0' || *p == '/' || *p == '?' || *p == '#';
+    uint32_t be;
+    memcpy(&be, ip, 4);
+    return bu_url_host_is(url, be);
 }
 
 #define IMG_FILE_HDR_LEN    32

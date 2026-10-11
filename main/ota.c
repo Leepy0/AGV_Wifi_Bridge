@@ -106,15 +106,6 @@ static void json_safe(char *dst, size_t cap, const char *src)
     dst[i] = '\0';
 }
 
-// 메인보드 스테이징(다운로드) 중인지 — dsp_ota 상태 JSON 의 dsp_st 로 판단
-static bool dsp_staging(void)
-{
-    char st[200];
-    st[0] = '\0';
-    dsp_ota_status_json(st, sizeof(st));
-    return strstr(st, "\"dsp_st\":\"downloading\"") != NULL;
-}
-
 static void confirm_timeout(void *arg)
 {
     ESP_LOGE(TAG, "no server contact within %llds - rolling back", CONFIRM_TIMEOUT_US / 1000000);
@@ -266,7 +257,7 @@ esp_err_t ota_start(const char *url)
     // s_busy 를 먼저 세운 뒤 메인보드 상태를 본다 — 메인보드 적용 쪽도 상태를 먼저 세운 뒤 ota_busy() 를 보면
     // 동시에 시작해도 둘 중 하나는 반드시 상대를 보고 물러난다.
     // 스테이징(다운로드) 중에도 거부: OTA 완료 후 재부팅이 스테이징을 끊어 staged 보고 없이 사라짐
-    const char *why = dsp_ota_busy() ? "mainboard_programming" : dsp_staging() ? "mainboard_staging" : NULL;
+    const char *why = dsp_ota_busy() ? "mainboard_programming" : dsp_ota_staging() ? "mainboard_staging" : NULL;
     if (why) {
         __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST);
         ESP_LOGW(TAG, "rejected: %s", why);
