@@ -5,6 +5,13 @@
 #define STX 0x02
 #define ETX 0x03
 
+// 고정 주소 접근 (앱 헤더·부트 정보·부트 카운터). 호스트 시험은 가짜 메모리로 바꿔 끼운다 (tests/host)
+#ifndef FWUP_MEM
+#define FWUP_MEM(a)     ((volatile uint16_t *)(a))
+#endif
+
+#define FWUP_FRAME_LEN  11  // F + PAN + MSG + AGV(2) + 종류 + "000" + 공백 + BCC
+
 // 앱 헤더 자리표시자 (0x3E8000, 64 워드). 패커가 실제 값(버전·길이·CRC)으로 덮어쓴다
 #pragma DATA_SECTION(g_apphdr, ".apphdr")
 const uint16_t g_apphdr[DSPIMG_HDR_WORDS] = { DSPIMG_MAGIC0, DSPIMG_MAGIC1 };
@@ -24,7 +31,7 @@ char fwup_bcc(const char *payload, uint16_t len)
 
 const char *fwup_app_version(void)
 {
-    const uint16_t *hdr = (const uint16_t *)DSPIMG_APP_HDR_ADDR;
+    const volatile uint16_t *hdr = FWUP_MEM(DSPIMG_APP_HDR_ADDR);
     uint16_t i;
     if (hdr[DSPIMG_W_MAGIC0] != DSPIMG_MAGIC0 || hdr[DSPIMG_W_MAGIC1] != DSPIMG_MAGIC1) {
         return "-";
@@ -41,7 +48,7 @@ const char *fwup_app_version(void)
 
 const char *fwup_boot_version(void)
 {
-    const uint16_t *info = (const uint16_t *)DSPIMG_BOOTINFO_ADDR;
+    const volatile uint16_t *info = FWUP_MEM(DSPIMG_BOOTINFO_ADDR);
     uint16_t i;
     if (info[0] != DSPIMG_BOOT_MAGIC0 || info[1] != DSPIMG_BOOT_MAGIC1) {
         return "-";
@@ -88,6 +95,17 @@ static void put_date(char *dst, uint32_t t)
     dst[6] = (char)('0' + d / 10); dst[7] = (char)('0' + d % 10);
 }
 
+// PAN·MSG 자리: 16진 1~F (브리지 dsp_app_proto.c 와 같은 규칙, '0' 없음)
+static int is_hex1(char c)
+{
+    return (c >= '1' && c <= '9') || (c >= 'A' && c <= 'F');
+}
+
+static int is_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
 int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn safe,
                 char *reply, uint16_t cap, uint16_t *reply_len)
 {
@@ -95,8 +113,13 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
     uint16_t blen = 0, i, n;
     int result = FWUP_REPLY;
 
-    // 헤더 5 + 본문 ≥ 1 + 공백 + BCC
-    if (len < 8 || payload[0] != 'F' || cap < FWUP_REPLY_MAX) {
+    // 요청은 항상 11자: F PAN MSG AGV(2) 종류 '000' 공백 BCC. BCC 가 4비트뿐이라 자리별 문자 범위도 모두 본다
+    // (설계서 5절) — 비트가 깨진 ACS 프레임이 우연히 BCC 까지 맞아 업데이트 진입으로 읽히지 않게
+    if (len != FWUP_FRAME_LEN || payload[0] != 'F' || cap < FWUP_REPLY_MAX) {
+        return FWUP_NONE;
+    }
+    if (!is_hex1(payload[1]) || !is_hex1(payload[2]) || !is_digit(payload[3]) || !is_digit(payload[4]) ||
+        payload[6] != '0' || payload[7] != '0' || payload[8] != '0' || payload[9] != ' ') {
         return FWUP_NONE;
     }
     if (payload[len - 1] != fwup_bcc(payload, (uint16_t)(len - 1))) {
@@ -109,7 +132,7 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
 
     switch (payload[5]) {
     case 'V': {
-        const uint16_t *hdr = (const uint16_t *)DSPIMG_APP_HDR_ADDR;
+        const volatile uint16_t *hdr = FWUP_MEM(DSPIMG_APP_HDR_ADDR);
         uint32_t build = (uint32_t)hdr[DSPIMG_W_BUILD_LO] | ((uint32_t)hdr[DSPIMG_W_BUILD_HI] << 16);
         body[0] = 'V';
         put_fixed(&body[1], fwup_app_version(), 8);
@@ -123,7 +146,8 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
         break;
     }
     case 'U': {
-        uint16_t reason = safe ? safe() : 0;
+        // 안전 조건 콜백이 없으면 거부 (사유 9) — 연결을 빠뜨린 채 주행 중 리셋되는 일이 없게 (fail-closed)
+        uint16_t reason = safe ? safe() : 9;
         body[0] = 'U';
         if (reason == 0) {
             body[1] = 'O'; body[2] = 'K'; body[3] = '0'; body[4] = '0';
@@ -161,14 +185,14 @@ int fwup_handle(const char *payload, uint16_t len, uint16_t agv_id, fwup_safe_fn
 
 void fwup_boot_ok(void)
 {
-    volatile uint16_t *c = (volatile uint16_t *)DSPIMG_BOOTCNT_ADDR;
+    volatile uint16_t *c = FWUP_MEM(DSPIMG_BOOTCNT_ADDR);
     c[0] = DSPIMG_BOOTCNT_MAGIC;
     c[1] = 0;
 }
 
 void fwup_reset(void)
 {
-    volatile uint16_t *f = (volatile uint16_t *)DSPIMG_BOOTFLAG_ADDR;
+    volatile uint16_t *f = FWUP_MEM(DSPIMG_BOOTFLAG_ADDR);
     f[0] = DSPIMG_BOOTFLAG_0;
     f[1] = DSPIMG_BOOTFLAG_1;
     f[2] = DSPIMG_BOOTFLAG_2;

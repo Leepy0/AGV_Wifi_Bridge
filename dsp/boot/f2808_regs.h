@@ -50,11 +50,15 @@
 // ── SCI-A ──
 #define SCICCR              REG16(0x7050)
 #define SCICTL1             REG16(0x7051)
+#define SCICTL1_RUN         0x0023      // RXENA | TXENA | SW RESET 해제
+#define SCICTL1_HOLD        0x0003      // RXENA | TXENA, SW RESET 유지 (플래그·상태기계 초기화)
 #define SCIHBAUD            REG16(0x7052)
 #define SCILBAUD            REG16(0x7053)
 #define SCICTL2             REG16(0x7054)
 #define SCICTL2_TXEMPTY     0x0040
 #define SCIRXST             REG16(0x7055)
+#define SCIRXST_RXERROR     0x0080      // BRKDT | FE | OE | PE — SW RESET 토글로만 풀림
+#define SCIRXST_BRKDT       0x0020      // 브레이크(RX 10비트 이상 low): 풀 때까지 수신 정지
 #define SCIRXBUF            REG16(0x7057)
 #define SCITXBUF            REG16(0x7059)
 #define SCIFFTX             REG16(0x705A)
@@ -63,6 +67,9 @@
 #define SCIFFRX_RXFFST_MASK 0x1F00      // 12:8
 #define SCIFFRX_RXFFOVF     0x8000
 #define SCIFFRX_RXFFOVRCLR  0x4000
+#define SCIFFRX_RXFIFORESET 0x2000      // 0 = RX FIFO 리셋 유지
+#define SCIFFRX_RESETVAL    0x201F      // 리셋 기본값
+#define SCIFFTX_RESETVAL    0xA000      // 리셋 기본값 (SCIRST | TXFIFORESET)
 #define SCIFFCT             REG16(0x705C)
 
 // ── CPU 타이머 0 ──

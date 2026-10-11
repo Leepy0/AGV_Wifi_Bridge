@@ -37,6 +37,12 @@
 #define BP_ERASE_D          0x04
 #define BP_ERASE_APP        0x07
 
+// READ(진단) 허용 범위 (워드 주소, 끝은 exclusive) — 주변장치 레지스터(예: SCIRXBUF)를 읽어 부수효과가 생기지 않게
+#define BP_READ_FLASH_START 0x3E8000UL      // 플래시 전체: 앱(섹터 D~B) + 부트로더(섹터 A)
+#define BP_READ_FLASH_END   0x3F8000UL
+#define BP_READ_OTP_START   0x3D7800UL      // OTP 1K 워드
+#define BP_READ_OTP_END     0x3D7C00UL
+
 // 장치 쪽 하드웨어 콜백
 typedef struct {
     uint16_t (*erase)(uint16_t mask);                                   // BP_ERASE_* 마스크 → BP_ST_*
@@ -53,9 +59,11 @@ typedef struct {
     uint16_t tx_len;
     uint16_t reset_pending;         // RESET 응답을 보낸 뒤 호출 측이 리셋 수행 (mode 는 reset_mode)
     uint16_t reset_mode;
-    uint16_t last_seq, last_cmd;    // 같은 seq 재전송이면 다시 처리하지 않고 응답만 반복
+    uint16_t last_seq, last_cmd;    // 같은 요청(seq·cmd·길이·CRC 모두 같음)의 재전송이면 다시 처리하지 않고 응답만 반복
+    uint16_t last_len, last_crc;
     uint16_t last_tx[BP_MAX_PACKET];
     uint16_t last_tx_len;
+    uint16_t accept_cmd;            // 0 = 모든 명령. 0 아니면 이 명령만 처리하고 나머지는 무응답 (부팅 직후 HELLO 창)
 } bp_ctx_t;
 
 void bp_init(bp_ctx_t *c, const bp_ops_t *ops);
