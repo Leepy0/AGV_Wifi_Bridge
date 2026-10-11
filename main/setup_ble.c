@@ -337,4 +337,20 @@ void sble_send(const char *s, size_t len)
     }
 }
 
+void sble_disconnect(void)
+{
+    uint16_t conn = s_conn;
+    if (conn == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));             // 직전 알림(안내 문구)이 나갈 여유
+    taskENTER_CRITICAL(&s_mux);
+    s_rx_len = 0;                               // 끊긴 연결의 남은 입력 폐기
+    taskEXIT_CRITICAL(&s_mux);
+    int rc = ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc != 0 && rc != BLE_HS_ENOTCONN) {
+        ESP_LOGW(TAG, "terminate failed rc=%d", rc);
+    }
+}
+
 #endif // CONFIG_BR_SETUP_BLE

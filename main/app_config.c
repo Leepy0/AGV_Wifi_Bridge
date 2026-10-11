@@ -10,6 +10,7 @@
 #include "lwip/inet.h"
 #include "sdkconfig.h"
 #include "app_config.h"
+#include "bridge_util.h"
 
 static const char *TAG = "cfg";
 static const char *NVS_NS      = "bridge";
@@ -17,6 +18,9 @@ static const char *NVS_KEY     = "cfg";
 static const char *NVS_KEY_BAK = "cfg_bak";     // 원격 저장 직전의 동작 설정 — 있으면 확인 대기(trial) 중
 
 #define TRIAL_TIMEOUT_US  (180LL * 1000 * 1000)  // 원격 변경 후 이 시간 안에 서버 통신이 없으면 복구
+
+_Static_assert(CONFIG_BR_HB_MS == 0 || (CONFIG_BR_HB_MS >= BU_HB_MS_MIN && CONFIG_BR_HB_MS <= BU_HB_MS_MAX),
+               "BR_HB_MS must be 0 (off) or 100-2000 ms");
 
 app_cfg_t g_cfg;                    // 실행 중 설정 — 부팅 시 확정, 이후 변경 안 함
 static app_cfg_t s_edit;            // 편집용 사본 (콘솔/원격/웹) — save 후 재부팅 시 반영
@@ -150,6 +154,12 @@ void cfg_load(void)
             g_cfg = tmp;
             s_saved = true;
             ESP_LOGI(TAG, "loaded config from NVS");
+            if (!bu_hb_ms_valid(g_cfg.hb_ms)) {
+                // 이전 버전에서 허용하던 값(최대 60000) — 서버의 1초 주기 전제와 맞지 않아 기본값으로
+                ESP_LOGW(TAG, "saved hb_ms %u out of range (0 or %d-%d) - using default %d",
+                         g_cfg.hb_ms, BU_HB_MS_MIN, BU_HB_MS_MAX, CONFIG_BR_HB_MS);
+                g_cfg.hb_ms = CONFIG_BR_HB_MS;
+            }
         } else if (err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "saved config invalid (%s), using defaults", esp_err_to_name(err));
         }
@@ -350,7 +360,7 @@ static bool apply(app_cfg_t *c, const char *key, const char *val)
         if (!parse_uint(val, 1200, 1000000, &v)) return false;
         c->rfid_baud = v;
     } else if (strcmp(key, "hb_ms") == 0) {
-        if (!parse_uint(val, 0, 60000, &v) || (v > 0 && v < 100)) return false;
+        if (!parse_uint(val, 0, BU_HB_MS_MAX, &v) || !bu_hb_ms_valid(v)) return false;   // 0 = 끔, 100~2000
         c->hb_ms = (uint16_t)v;
     } else {
         return false;
