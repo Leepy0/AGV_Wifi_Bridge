@@ -26,7 +26,9 @@ const int HttpPort = 8070;    // OTA 펌웨어 파일 서비스용
 var agvs = new ConcurrentDictionary<byte, Agv>();
 var logLock = new object();
 var showHb = false;
-var dspJob = 0;        // 테스트용 작업 번호 (관리 서버에서는 DB 의 job id)
+// 테스트용 작업 번호 — 실행마다 다른 값에서 시작 (브리지 0.5.2 는 같은 번호의 START/APPLY 를 중복으로 보고 다시 받거나 굽지 않음)
+// 게이트웨이와 같은 방식: (유닉스 초 % 10,000,000) × 100, u32 범위 안
+var dspJob = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() % 10_000_000) * 100;
 
 using var mainSock = OpenUdp(MainPort);
 using var rfidSock = OpenUdp(RfidPort);
