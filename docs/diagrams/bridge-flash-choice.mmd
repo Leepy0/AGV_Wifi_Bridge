@@ -1,0 +1,18 @@
+flowchart TD
+  Q{"이 브리지는 지금 어떤 상태?"}
+  Q -- "새 보드 · 처음 설치" --> A
+  Q -- "0.5.0 미만<br/>또는 dsp_st=nopart" --> K{"호기 설정을<br/>살릴까?"}
+  K -- "아니오 · 새로 설정" --> A
+  K -- 예 --> B
+  Q -- "0.5.x 정상 · 서버에 붙어 있음" --> D
+  Q -- "0.5.x 정상 · 서버에 못 붙음<br/>(벤치 · 수리)" --> C
+  A["<b>전체 이미지</b><br/>flash.bat COM5<br/>merged.bin → 0x0"] --> RA["파티션 새로 · 설정 지워짐<br/>첫 부팅에 BLE 설정 모드 자동"]
+  B["<b>개별 파일 4개</b><br/>0x0 부트로더 · 0x8000 파티션 표<br/>0xF000 ota_data · 0x20000 앱"] --> RB["파티션 새로 · 설정 유지<br/>nvs 0x9000 은 안 건드림"]
+  C["<b>앱만</b><br/>0xF000 ota_data<br/>0x20000 앱"] --> RC["파티션 그대로 · 설정 유지"]
+  D["<b>USB 불필요</b><br/>게이트웨이 배포 작업"] --> RD["7장 · 이후 업데이트"]
+  classDef full fill:#fee2e2,stroke:#dc2626,color:#0f172a
+  classDef keep fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef ota fill:#dbeafe,stroke:#2563eb,color:#0f172a
+  class A full
+  class B,C keep
+  class D ota

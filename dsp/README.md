@@ -55,15 +55,16 @@ tools/dsp_pack.py   CCS 빌드 결과 → OTA 이미지(.dspfw)
    버전 문자열은 **8자 이하**로 (`R` 응답의 버전 칸이 8자 고정이라 브리지가 앞 8자로 완료 여부를 판단).
    HEX 는 반드시 `--memwidth=16 --romwidth=16`(워드 주소) 로 뽑는다 — 바이트 주소 HEX 는 패커가 거부한다.
 5. 첫 설치(1회, 유선): 부트로더(섹터 A) + 재링크한 앱(섹터 B~D) 을 JTAG 으로 굽고, 앱 헤더가 비어 있으므로
-   **처음 한 번은 브리지(또는 BridgeTest 의 시리얼 모드)로 .dspfw 를 적용**해서 헤더를 채운다.
+   **처음 한 번은 브리지(또는 PC 에서 `tools/dsp_flash.py`)로 .dspfw 를 적용**해서 헤더를 채운다.
    헤더가 없으면 부트로더는 앱을 무효로 보고 업데이트 모드에서 기다린다.
 
 ## 3. 벤치 검증 순서
 
-1. 부트로더만 굽고 리셋 → SCI-A 115200 으로 HELLO 응답 확인 (`BridgeTest dspserial COM5 hello`).
-2. `BridgeTest dspserial COM5 app.dspfw` 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
-3. 앱에서 `F3107V000` 프레임에 `R3107V…` 응답, `F3107U000` 에 `R3107UOK00` 후 부트로더 진입 확인.
-4. 브리지 연결 → 서버(BridgeTest) `dspota 7 stage app.dspfw` → `dspota 7 apply` → `done` 보고와 heartbeat `dsp` 버전 확인.
+1. 부트로더만 굽고 리셋 → SCI-A 115200 으로 HELLO 응답 확인 (`python tools/dsp_flash.py COM5 --hello`).
+2. `python tools/dsp_flash.py COM5 app.dspfw` 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
+3. 앱에서 `F3107V000` 프레임에 `R3107V…` 응답, `F3107U000` 에 `R3107UOK00` 후 부트로더 진입 확인 (`dsp_flash.py COM5 --query 7`, `dsp_flash.py COM5 app.dspfw --enter 7`).
+4. 브리지 연결 → 서버(BridgeTest) `dspota 7 stage app.dspfw apply`(스테이징 후 바로 적용) → `done` 보고와 heartbeat `dsp` 버전 확인.
+   스테이징 뒤 따로 `dspota 7 apply` 를 보내면 BridgeTest 수정 전까지 `job_mismatch` 로 거부된다(명령마다 새 job 번호). 다시 적용할 때는 `stage … apply` 를 다시 보내거나 `cfg 7 dsp apply`(브리지 콘솔은 `dsp apply`) — job 검사 없이 적용.
 5. 실패 주입: 쓰는 중 전원 차단 → 재부팅 시 부트로더 대기 → 다시 apply 로 복구. 잘못된 파일·CRC 오류 → 거부.
 6. 기동 불능 앱: `fwup_boot_ok()` 를 부르지 않는(또는 바로 워치독 리셋되는) 앱을 올림 → 리셋 3회 뒤 HELLO 에 응답(업데이트 모드) → 정상 앱 apply 로 복구.
 7. 브리지 재부팅 주입: WRITE 도중 브리지 `reboot` → 다음 apply 의 HELLO 가 첫 시도에 응답하는지 (파서 재동기).

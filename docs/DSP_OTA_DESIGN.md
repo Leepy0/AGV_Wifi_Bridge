@@ -1,7 +1,7 @@
 # 메인보드(TMS320F2808) OTA 설계 — B안: 상주 부트로더
 
 > 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`). 실기 검증 전.
-> 범위: DSP 부트로더 · 메인보드 앱 수정 · 브리지(ESP32) · 패커 · 펌웨어 관리 서버(향후).
+> 범위: DSP 부트로더 · 메인보드 앱 수정 · 브리지(ESP32) · 패커 · 펌웨어 관리 서버(게이트웨이, 구현됨).
 
 ## 1. 전체 구조
 
@@ -139,14 +139,16 @@ CRC32: 표준(poly 0xEDB88320, init 0xFFFFFFFF, 최종 XOR). 워드마다 **하�
 
 | cmd | 이름 | payload | 응답 payload | 시간 |
 |---|---|---|---|---|
-| 0x01 | HELLO | — | status, boot_ver(16 B), proto_ver, app_valid, app_ver(32 B), max_block(워드) | 즉시 |
-| 0x02 | ERASE | 섹터 마스크 (bit0=B, bit1=C, bit2=D) | status | 섹터당 1~2초 |
-| 0x03 | WRITE | addr u32, nwords u16, data | status | 128 워드 ≈ 30ms |
-| 0x04 | VERIFY | — | status, crc32 계산값, 헤더 유효 여부 | ~수 ms |
+| 0x01 | HELLO | — | status, proto_ver, max_block(u16, 워드), app_valid, boot_ver(16 B), app_ver(32 B), app_crc32(u32), app_len(u32, 워드) — 61 B | 즉시 |
+| 0x02 | ERASE | 섹터 마스크 (bit0=B, bit1=C, bit2=D) | status — 1 B | 섹터당 1~2초 |
+| 0x03 | WRITE | addr u32, nwords u16, data | status, addr u32 — 5 B | 128 워드 ≈ 30ms |
+| 0x04 | VERIFY | — | status, app_valid(헤더·CRC 모두 맞으면 1), crc32 계산값(u32), app_len(u32), 검사 코드(`DSPIMG_*`) — 11 B | ~수 ms |
 | 0x05 | RESET | 0 = 앱으로 | status 후 워치독 리셋 | — |
 | 0x06 | READ | addr u32, nwords u16 | status, data | 진단용 |
 
-- 블록 128 워드(256 B). 브리지 타임아웃: 일반 500ms, ERASE 15s. 재시도 3회(seq 로 중복 판별).
+- 응답 순서·길이는 `dsp/common/bootproto.c` `handle()` 기준, 다중 바이트는 리틀 엔디언. HELLO 의 app_crc32·app_len 은 앱이 유효할 때만 값(아니면 0). 브리지는 HELLO·ERASE·WRITE·VERIFY 응답 길이가 다르면 실패로 본다.
+- 블록 128 워드(256 B). 브리지 타임아웃(`main/dsp_ota.c`): 일반 응답 800ms(`RESP_MS`), 첫 HELLO 1.5s(`HELLO_MS`), ERASE 20s(`ERASE_MS`), VERIFY 2s. 앱 `U`/`V` 응답 대기 2s(`APP_REPLY_MS`), `UOK` 뒤 400ms(`BOOT_START_MS`) 후 HELLO.
+- 재시도: 패킷마다 같은 seq 로 3회까지 재전송(`RETRIES`). 부트로더는 직전과 같은 seq·cmd 면 다시 처리하지 않고 응답만 반복한다.
 - WRITE 는 쓴 뒤 읽어 비교(Flash_Verify)까지 하고 응답한다.
 - 쓰기 순서: 블록들 → **앱 헤더(0x3E8000) 마지막**.
 
@@ -199,7 +201,7 @@ CRC32: 표준(poly 0xEDB88320, init 0xFFFFFFFF, 최종 XOR). 워드마다 **하�
 | `0x11` INFO_REQ | 서버 → ESP | 없음 |
 | `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw(ESP), part, ota, cfg, dsp(앱 버전), dspb(부트로더 버전), dsp_build, staged{job, ver} |
 | `0x32` DSP_OTA_START | 서버 → ESP | JSON: url, ver, crc32, size, job, apply(0/1) |
-| `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage(staged/enter/erase/progress/verify/done/fail), pct, ver, err |
+| `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage(download/staged/start/enter/erase/progress/verify/done/fail), pct, ver, err |
 | `0x34` DSP_OTA_APPLY | 서버 → ESP | JSON: job |
 
 - heartbeat(STATUS) 에 `dsp`, `dspb`, `staged` 필드 추가. 서버는 이것으로 전 호기 버전 현황을 갱신한다.
@@ -209,11 +211,13 @@ CRC32: 표준(poly 0xEDB88320, init 0xFFFFFFFF, 최종 XOR). 워드마다 **하�
 
 - `uart_bridge` 에 원시 모드 추가: ETX 프레이밍 해제, RFID→메인보드 바이패스 정지, 서버 MAIN_DOWN 폐기(카운트), 프로그래밍 태스크가 바이트 단위로 읽고 씀. 끝나면 복귀.
 - 조건: ESP OTA 진행 중이면 거부. 스테이징된 이미지의 CRC 가 맞지 않으면 거부.
-- 실패 시 재시도: 부트로더는 앱이 무효한 동안 업데이트 모드에 머무르므로 HELLO 부터 3회까지 자동 재시도. 그래도 실패하면 fail 보고. 이미지는 남겨 서버가 다시 APPLY 할 수 있게 한다.
+- 실패 시: 자동 재시도는 패킷 단위뿐이다(`bl_xfer` 의 `RETRIES` 3회. HELLO 는 1.5s × 3 = 4.5초). HELLO 부터 절차 전체를 다시 하지는 않고 fail 보고로 끝낸다. 이미지는 남겨(`staged`) 서버가 다시 APPLY 할 수 있게 한다(게이트웨이는 따로 적용하는 기능이 없어 작업을 다시 돌리면 스테이징부터 다시 한다). 부트로더는 앱이 무효한 동안 업데이트 모드에 머무르고, 브리지는 앱 `U` 응답이 없으면(2s) HELLO 로 넘어가므로 다시 APPLY 하면 이어진다.
 
-## 7. 펌웨어 관리 서버 (향후)
+## 7. 펌웨어 관리 서버 (구현됨 — 게이트웨이)
 
-Gateway(ACS 연동, UDP 50000) 와 같은 프로세스 또는 그 옆에 둔다. BridgeTest.cs 가 참조 구현이며, 실제 서버는 .NET 으로 만들어도 같은 패킷을 쓴다.
+게이트웨이 [AGV_FOTA_GATEWAY](https://github.com/Leepy0/AGV_FOTA_GATEWAY)(ASP.NET Core, Windows 서비스)로 구현되었다. 브리지와 UDP 50000 으로 같은 패킷을 주고받고, 펌웨어 파일은 HTTP 8080 으로 내준다. 흐름은 [SYSTEM_FLOW.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/SYSTEM_FLOW.md), 설치·운영은 [DEPLOY.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/DEPLOY.md). BridgeTest.cs 는 벤치용 참조 구현으로 남는다.
+
+아래 데이터·기능은 처음 설계안이다. 실제 구현은 게이트웨이 문서를 본다.
 
 ### 데이터
 
@@ -239,7 +243,7 @@ Gateway(ACS 연동, UDP 50000) 와 같은 프로세스 또는 그 옆에 둔다.
 
 ## 8. 안전·운용 규칙
 
-- 적용은 **정지 상태**에서만. 서버(ACS)와 앱(`U000` 진입 조건) 이중 확인.
+- 적용은 **정지 상태**에서만. 현재 서버(게이트웨이)는 정지 여부를 확인하지 않는다(스테이징 직후 바로 적용, 운용자 책임). 앱의 `U000` 진입 조건(safe 콜백)은 필수다.
 - 적용 중 메인보드는 앱을 돌리지 않는다(약 20~30초). 이 동안 RFID 바이패스도 멈춘다.
 - 전원이 끊기면 앱 헤더가 깨진 채 남고, 다음 부팅에 부트로더가 대기한다. 서버에서 다시 APPLY.
 - CRC 는 맞지만 기동 직후 죽는 앱(링커 cmd·클럭 초기화 실수)이 올라가면 워치독 리셋 3회 뒤 부트로더가 업데이트 모드로 들어가므로 서버에서 고친 이미지를 다시 APPLY 하면 된다. 그래서 앱은 메인 루프 진입 시 `fwup_boot_ok()` 를 반드시 호출한다.
@@ -263,7 +267,7 @@ Gateway(ACS 연동, UDP 50000) 와 같은 프로세스 또는 그 옆에 둔다.
 ## 10. 구현 순서
 
 1. 패커 + 이미지 형식 + CRC 테스트 벡터 (호스트 테스트)
-2. 부트로더 소스·링커 cmd·앱 수정 예시 → CCS 빌드 → JTAG 으로 벤치 검증 (PC 에서 BridgeTest 로 직접 시리얼 프로그래밍)
+2. 부트로더 소스·링커 cmd·앱 수정 예시 → CCS 빌드 → JTAG 으로 벤치 검증 (PC 에서 `tools/dsp_flash.py` 로 직접 시리얼 프로그래밍)
 3. 브리지: 파티션, 패킷, 스테이징, UART 원시 모드, 프로그래밍 클라이언트, INFO/heartbeat
 4. BridgeTest: `dspota stage/apply/info` 명령 (서버 참조 구현)
-5. 관리 서버 (별도 과제)
+5. 관리 서버 — 게이트웨이(AGV_FOTA_GATEWAY)로 구현 (7절)

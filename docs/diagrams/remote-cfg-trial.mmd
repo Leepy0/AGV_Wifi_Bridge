@@ -1,0 +1,18 @@
+sequenceDiagram
+  autonumber
+  participant OP as 운용자
+  participant GW as 게이트웨이
+  participant ESP as 브리지
+  OP->>GW: 통신 로그 · 설정 명령 "set ip …" · CFG_CMD 전송
+  GW->>ESP: CFG_CMD 0x40
+  ESP-->>GW: CFG_RESULT 0x41 "ok ip - 'save' then 'reboot' to apply"
+  OP->>GW: 설정 명령 "save"
+  ESP->>ESP: 지금 설정 백업 · 새 설정 저장 (확인 대기)
+  OP->>GW: 설정 명령 "reboot"
+  ESP->>ESP: 재부팅 · cfg=trial · 180초 시계 시작
+  ESP-->>GW: heartbeat cfg=trial (새 주소에서)
+  OP->>GW: 호기 현황 · 그 호기 행 · PING (180초 안에)
+  GW->>ESP: PING 0x20
+  ESP->>ESP: 새 설정 확정 · 백업 삭제
+  ESP-->>GW: heartbeat cfg=saved
+  Note over GW,ESP: 서버 패킷 없이 180초가 지나면 이전 설정으로 복구하고 재부팅

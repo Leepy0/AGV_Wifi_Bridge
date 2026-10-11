@@ -12,7 +12,7 @@ CCS 빌드 결과 → OTA 이미지(.dspfw). 형식은 docs/DSP_OTA_DESIGN.md 3�
     dsp_pack.py selftest        # CRC 테스트 벡터 (C 구현과 대조용)
 
 hex2000 Intel HEX 는 --memwidth=16 --romwidth=16 일 때 주소가 워드 단위이고 각 워드가
-상위 바이트 → 하위 바이트 순으로 기록된다 (실측). 바이트 주소(0x7D0000 대)로 나오면 자동 변환한다.
+상위 바이트 → 하위 바이트 순으로 기록된다 (실측). 바이트 주소(0x7D0000 대)로 나오면 거부한다.
 """
 import argparse
 import struct

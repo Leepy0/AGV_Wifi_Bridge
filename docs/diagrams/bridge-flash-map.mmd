@@ -1,0 +1,32 @@
+flowchart TB
+  subgraph NEW["v0.5.x · 지금 (4MB)"]
+    direction LR
+    N0["0x0<br/>부트로더<br/>─<br/>0x8000<br/>파티션 표"]
+    N2["0x9000<br/><b>nvs</b> 24KB<br/>─<br/><b>호기 설정</b><br/>agv · Wi-Fi<br/>IP · 서버"]
+    N3["0xF000<br/>otadata 8KB<br/>부팅 슬롯<br/>─<br/>0x11000<br/>phy_init 4KB"]
+    N5["0x20000<br/><b>ota_0</b><br/>1.75MB<br/>(0x1C0000)<br/>─<br/>앱 슬롯 0<br/>USB 로 굽는 곳"]
+    N6["0x1E0000<br/><b>ota_1</b><br/>1.75MB<br/>(0x1C0000)<br/>─<br/>앱 슬롯 1<br/>OTA 가 번갈아 씀"]
+    N7["0x3A0000<br/><b>dspfw</b><br/>384KB<br/>(0x60000)<br/>─<br/>메인보드<br/>이미지 보관"]
+    N0 --- N2 --- N3 --- N5 --- N6 --- N7
+  end
+  subgraph OLD["v0.4.x 이하 · 이전"]
+    direction LR
+    O0["0x0<br/>부트로더<br/>─<br/>0x8000<br/>파티션 표"]
+    O2["0x9000<br/><b>nvs</b> 24KB<br/>─<br/>호기 설정<br/>위치 같음"]
+    O3["0xF000<br/>otadata 8KB<br/>─<br/>0x11000<br/>phy_init 4KB"]
+    O5["0x20000<br/><b>ota_0</b><br/>1.875MB<br/>(0x1E0000)"]
+    O6["0x200000<br/><b>ota_1</b><br/>1.875MB<br/>(0x1E0000)"]
+    O7["0x3E0000<br/>빈 곳 128KB<br/>─<br/>dspfw 없음"]
+    O0 --- O2 --- O3 --- O5 --- O6 --- O7
+  end
+  NEW ~~~ OLD
+  classDef sys fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef cfg fill:#fef3c7,stroke:#d97706,color:#0f172a
+  classDef app fill:#dbeafe,stroke:#2563eb,color:#0f172a
+  classDef dsp fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef none fill:#ffffff,stroke:#94a3b8,stroke-dasharray:4 3,color:#475569
+  class N0,N3,O0,O3 sys
+  class N2,O2 cfg
+  class N5,N6,O5,O6 app
+  class N7 dsp
+  class O7 none
