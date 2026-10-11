@@ -127,8 +127,10 @@ bool uart_bridge_send_main(const uint8_t *d, size_t n)
 esp_err_t uart_bridge_raw_begin(void) { m_raw_begins++; return ESP_OK; }
 void uart_bridge_raw_end(void) {}
 
+static void (*m_on_raw)(void);      // 원시 송신 때 1회 불림 (굽는 중 서버 재전송 흉내)
 void uart_bridge_raw_write(const uint8_t *b, size_t n)
 {
+    if (m_on_raw) { void (*f)(void) = m_on_raw; m_on_raw = NULL; f(); }
     if (!m_boot && m_app == APP_DEAD && m_power_on_at >= 0 && m_now >= m_power_on_at && m_now < m_power_on_at + 200000) {
         m_boot = true;                  // 리셋 직후 200ms 안에 HELLO → 업데이트 모드 (결정 8B)
         bp_init(&m_bp, &m_ops);
@@ -170,8 +172,10 @@ static uint32_t m_http_len, m_http_pos;
 static char m_http_url[256];
 static const char *m_redirect_to;   // 첫 요청을 302 로 이 URL 에 보냄
 static bool m_redirected;
+static int m_http_inits;
+static void (*m_on_http_read)(void);    // HTTP 읽기 때 1회 불림 (받는 중 서버 재전송 흉내)
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c)
-{ strncpy(m_http_url, c->url, sizeof(m_http_url) - 1); m_http_pos = 0; m_redirected = false; return (esp_http_client_handle_t)1; }
+{ m_http_inits++; strncpy(m_http_url, c->url, sizeof(m_http_url) - 1); m_http_pos = 0; m_redirected = false; return (esp_http_client_handle_t)1; }
 esp_err_t esp_http_client_open(esp_http_client_handle_t h, int w) { m_http_pos = 0; return ESP_OK; }
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t h) { return m_redirect_to && !m_redirected ? 0 : m_http_len; }
 int esp_http_client_get_status_code(esp_http_client_handle_t h) { return m_redirect_to && !m_redirected ? 302 : 200; }
@@ -183,6 +187,7 @@ esp_err_t esp_http_client_get_url(esp_http_client_handle_t h, char *u, const int
 { if ((int)strlen(m_http_url) >= len) return ESP_FAIL; strcpy(u, m_http_url); return ESP_OK; }
 int esp_http_client_read(esp_http_client_handle_t h, char *b, int len)
 {
+    if (m_on_http_read) { void (*f)(void) = m_on_http_read; m_on_http_read = NULL; f(); }
     uint32_t n = m_http_len - m_http_pos;
     if (n > 1000) n = 1000;             // 작은 조각으로 (머리 검사가 여러 조각을 모으는지)
     if ((uint32_t)len < n) n = (uint32_t)len;
@@ -444,6 +449,137 @@ static void t_start_cmd(void)
     CHECK(!m_last_cmd.recover);
 }
 
+// ───────── 같은 job 의 중복 명령 (INT-C1) ─────────
+
+// dsp_task 의 한 바퀴와 같게: 큐에서 꺼낸 명령 처리
+static void run_cmd(const cmd_t *in)
+{
+    cmd_t c = *in;
+    if (c.type == CMD_START) s_cur_start = c.job;
+    handle_cmd(&c);
+    s_cur_start = 0;
+}
+
+static char m_js_start[300], m_js_apply[100];
+static int m_q_in_hook;
+static void dup_start_hook(void) { int q = m_queued; dsp_ota_start(m_js_start, strlen(m_js_start)); m_q_in_hook = m_queued - q; }
+static void dup_apply_hook(void) { int q = m_queued; dsp_ota_apply(m_js_apply, strlen(m_js_apply)); m_q_in_hook = m_queued - q; }
+
+// 서버 명령 → 큐에 들어가면 처리. 큐에 들어갔으면 true
+static bool server_start(uint32_t job, int apply)
+{
+    snprintf(m_js_start, sizeof(m_js_start), "{\"job\":%u,\"url\":\"%s\",\"apply\":%d}", job, URL, apply);
+    int q = m_queued;
+    dsp_ota_start(m_js_start, strlen(m_js_start));
+    if (m_queued == q) return false;
+    run_cmd(&m_last_cmd);
+    return true;
+}
+static bool server_apply(uint32_t job)
+{
+    snprintf(m_js_apply, sizeof(m_js_apply), "{\"job\":%u}", job);
+    int q = m_queued;
+    dsp_ota_apply(m_js_apply, strlen(m_js_apply));
+    if (m_queued == q) return false;
+    run_cmd(&m_last_cmd);
+    return true;
+}
+
+static void t_duplicate(void)
+{
+    printf("-- 같은 job 의 중복 START·APPLY (INT-C1)\n");
+    uint32_t n = mkimg("1.2.3", NULL, 3000, 128);
+    reset_board(APP_OK, "1.0");
+    stage_clear();
+    s_state = ST_IDLE;
+    memset(&s_recent, 0, sizeof(s_recent));
+    m_http_body = m_img; m_http_len = n;
+
+    // 받는 중 같은 job 의 START 재전송 → 큐에 넣지 않고 무시
+    m_on_http_read = dup_start_hook; m_q_in_hook = -1;
+    int inits = m_http_inits;
+    CHECK(server_start(70, 0));
+    CHECK(m_q_in_hook == 0 && m_http_inits == inits + 1);
+    CHECK(s_stage.magic[0] && s_stage.job == 70 && s_state == ST_STAGED);
+    CHECK(count_rep("\"job\":70,\"stage\":\"staged\"") == FINAL_REPORTS);
+    // 스테이징 완료 뒤 중복 START → 다시 받지 않고 staged 다시 보고
+    m_nrep = 0;
+    CHECK(server_start(70, 0));
+    CHECK(m_http_inits == inits + 1 && count_rep("\"download\"") == 0);
+    CHECK(count_rep("\"job\":70,\"stage\":\"staged\",\"pct\":100,\"ver\":\"1.2.3\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+
+    // 굽는 중 같은 job 의 APPLY 재전송 → 무시
+    m_nrep = 0;
+    m_on_raw = dup_apply_hook; m_q_in_hook = -1;
+    CHECK(server_apply(70));
+    CHECK(m_q_in_hook == 0 && s_cur_apply == 0);
+    CHECK(count_rep("\"job\":70,\"stage\":\"done\"") == FINAL_REPORTS && !s_stage.magic[0]);
+    CHECK(strcmp(s_dsp_ver, "1.2.3") == 0 && s_state == ST_IDLE);
+    // done 뒤 중복 APPLY (스테이징 지워짐) → not_staged 가 아니라 done{ver} 다시 보고, 다시 굽지 않음
+    m_nrep = 0;
+    int raws = m_raw_begins;
+    CHECK(server_apply(70));
+    CHECK(m_raw_begins == raws && count_rep("not_staged") == 0 && count_rep("\"start\"") == 0);
+    CHECK(count_rep("\"job\":70,\"stage\":\"done\",\"pct\":100,\"ver\":\"1.2.3\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    // done 뒤 늦게 처리되는 중복 START → 다시 받지 않고 done 다시 보고
+    m_nrep = 0;
+    CHECK(server_start(70, 0));
+    CHECK(m_http_inits == inits + 1 && count_rep("\"job\":70,\"stage\":\"done\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    // 다른 job 은 지금처럼 (스테이징 없음 → not_staged)
+    m_nrep = 0;
+    CHECK(server_apply(71));
+    CHECK(count_rep("\"job\":0,\"stage\":\"fail\"") == FINAL_REPORTS && count_rep("not_staged") == FINAL_REPORTS);
+    // 기억 기간(10분)이 지난 뒤의 같은 job → 지금처럼 처리
+    m_now += (int64_t)(RECENT_S + 1) * 1000000;
+    m_nrep = 0;
+    CHECK(server_apply(70));
+    CHECK(count_rep("not_staged") == FINAL_REPORTS && count_rep("\"done\"") == 0);
+
+    // fail 뒤 중복 APPLY → 다시 굽지 않고 같은 fail 보고 (그 사이 앱이 정지 상태가 돼도)
+    reset_board(APP_NG, "1.0");
+    stage_raw(n, 72);
+    s_state = ST_STAGED;
+    CHECK(server_apply(72));
+    CHECK(count_rep("\"job\":72,\"stage\":\"fail\",\"ver\":\"1.2.3\",\"err\":\"app_ng_01\"") == FINAL_REPORTS);
+    m_app = APP_OK; m_nrep = 0;
+    CHECK(server_apply(72));
+    CHECK(count_rep("\"enter\"") == 0 && count_rep("\"start\"") == 0 && s_flash_untouched());
+    CHECK(count_rep("\"job\":72,\"stage\":\"fail\",\"ver\":\"1.2.3\",\"err\":\"app_ng_01\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    // 그 상태의 중복 START → 스테이징이 그대로 있으므로 staged 다시 보고 (받지 않음)
+    m_nrep = 0; inits = m_http_inits;
+    CHECK(server_start(72, 0));
+    CHECK(m_http_inits == inits && count_rep("\"job\":72,\"stage\":\"staged\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    // 다른 job 의 APPLY → 지금처럼 job_mismatch
+    m_nrep = 0;
+    CHECK(server_apply(73));
+    CHECK(count_rep("\"job\":73,\"stage\":\"fail\",\"ver\":\"1.2.3\",\"err\":\"job_mismatch\"") == FINAL_REPORTS);
+
+    // 받기 실패 뒤 중복 START → 다시 받지 않고 같은 fail 보고, 기존 스테이징(job 72) 유지
+    uint32_t bad = mkimg("2026.10.11", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = bad;
+    m_nrep = 0; inits = m_http_inits;
+    CHECK(server_start(74, 0));
+    CHECK(m_http_inits == inits + 1 && count_rep("\"job\":74,\"stage\":\"fail\",\"err\":\"ver_invalid\"") == FINAL_REPORTS);
+    m_nrep = 0;
+    CHECK(server_start(74, 0));
+    CHECK(m_http_inits == inits + 1 && count_rep("\"job\":74,\"stage\":\"fail\",\"err\":\"ver_invalid\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    CHECK(s_stage.magic[0] && s_stage.job == 72 && s_state == ST_STAGED);
+
+    // START apply:1 — 받는 중 재전송 무시, 완료(done) 뒤 중복 → done 다시 보고 (받지도 굽지도 않음)
+    n = mkimg("1.2.4", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = n;
+    reset_board(APP_OK, "1.2.3");
+    m_on_raw = dup_start_hook; m_q_in_hook = -1;      // 이어지는 적용 중에도 같은 job 의 START 는 무시
+    inits = m_http_inits;
+    CHECK(server_start(75, 1));
+    CHECK(m_q_in_hook == 0 && count_rep("\"job\":75,\"stage\":\"done\"") == FINAL_REPORTS && strcmp(s_dsp_ver, "1.2.4") == 0);
+    m_nrep = 0; raws = m_raw_begins;
+    CHECK(server_start(75, 1));
+    CHECK(m_http_inits == inits + 1 && m_raw_begins == raws);
+    CHECK(count_rep("\"job\":75,\"stage\":\"done\",\"pct\":100,\"ver\":\"1.2.4\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    m_http_body = NULL; m_http_len = 0;
+}
+
 static void t_json_safe(void)
 {
     printf("-- 보고·상태 JSON 이스케이프\n");
@@ -470,6 +606,7 @@ int main(int argc, char **argv)
     t_retry();
     t_wait_power();
     t_start_cmd();
+    t_duplicate();
     t_json_safe();
     printf(s_fail ? "%d FAILED\n" : "flow: all passed\n", s_fail);
     return s_fail ? 1 : 0;

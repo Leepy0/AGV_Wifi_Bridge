@@ -15,6 +15,8 @@ void      dsp_ota_start(const char *json, size_t len);
 //  recover:1 = 복구 적용 — 앱이 U 에 응답하지 않아도 부트로더로 직행, HELLO 가 안 되면 60초 동안 전원 재투입 대기(wait_power).
 //  recover 가 없으면 U 무응답은 app_no_reply (앱 버전을 모를 때 '?' 만 예외), U 송신 실패는 uart_busy.
 //  최종 보고(staged·done·fail)는 같은 내용을 3회 보낸다
+// 같은 job(0 제외)의 중복 명령(서버 재전송): 받는·굽는 중이면 무시. START 는 그 job 이 스테이징돼 있으면 staged 를 다시 보고,
+//  최근 10분 안의 같은 job 결과(받기 fail·적용 done{ver}·fail{err})가 있으면 다시 받거나 굽지 않고 그 결과를 다시 보고
 void      dsp_ota_apply(const char *json, size_t len);
 void      dsp_ota_query_version(void);                  // 앱에 버전 조회 (부팅 후·업데이트 후)
 // 메인보드 수신 프레임 관찰: PAN ID 학습, R 응답 소비. true = 소비함(서버로 올리지 않음)
