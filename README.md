@@ -14,6 +14,8 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 - 메인보드로 가는 데이터(RFID, ACS 하향)는 송신 태스크 하나가 **프레임 단위로** 내보냅니다. 두 데이터가 섞이지 않습니다.
 - **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰 블루투스(BLE)로도 바꿀 수 있습니다.
 
+**설치 가이드**: [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md) · **게이트웨이 서버**: [AGV_FOTA_GATEWAY](https://github.com/Leepy0/AGV_FOTA_GATEWAY) — [docs/SYSTEM_FLOW.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/SYSTEM_FLOW.md)(전체 흐름) · [docs/DEPLOY.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/DEPLOY.md)(설치·운영)
+
 ## 빌드 없이 굽기 (GitHub Actions 빌드 결과)
 
 푸시할 때마다 Actions 가 ESP-IDF v6.1 로 빌드합니다. `v*` 태그를 푸시하면 **Releases** 에 zip 이 첨부됩니다.
@@ -46,7 +48,7 @@ idf.py -p COM5 flash monitor
 
 ## OTA 무선 업데이트
 
-파티션은 `ota_0` / `ota_1` 두 슬롯(각 1.9MB)이며 롤백이 켜져 있습니다.
+파티션은 `ota_0` / `ota_1` 두 슬롯(각 1.75MB, `0x1C0000`)이며 롤백이 켜져 있습니다.
 
 - 서버가 `OTA_START`(0x30) 패킷에 URL 을 담아 보내면 ESP 가 HTTP 로 `agv_wifi_bridge.bin` 을 받아 빈 슬롯에 기록하고 재부팅합니다.
 - 진행 상황은 `OTA_RESULT`(0x31) JSON 으로 옵니다: `start` → `progress`(10% 단위) → `done`(재부팅) / `fail`(err) / `busy`.
@@ -105,7 +107,7 @@ cfg 7 save
 cfg 7 reboot
 ```
 
-명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup on|off` | `help` (`defaults` 는 원격에서 불가)
+명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup [on|off]` | `dsp [ver|apply]` | `help` (`defaults` 는 원격에서 불가)
 
 - **원격 저장은 확인 대기 상태로 저장됩니다.** 재부팅 후 180초 안에 서버에서 하향 패킷(PING 등)을 받지 못하면 저장 직전 설정으로 되돌리고 다시 재부팅합니다. SSID·IP·서버 주소를 잘못 넣어도 호기와 연결이 끊긴 채로 남지 않습니다(OTA 롤백과 같은 기준).
 - 서버 IP 를 바꾼 경우에는 **새 서버**가 180초 안에 패킷을 보내야 확정됩니다.
@@ -140,7 +142,7 @@ cfg 7 reboot
 4. 재부팅 후에도 BLE 가 다시 열려 있으므로, 다시 연결해 `login` → `stat` 으로 `wifi: UP` 을 확인합니다.
 
 - 비밀번호 기본값은 `agvsetup` 입니다. menuconfig 에서 바꾸세요. 새로 연결할 때마다 `login` 이 필요합니다.
-- 명령: `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup off` · `help`. 현장 저장이라 즉시 확정됩니다.
+- 명령: `login` · `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup [on|off]` · `dsp [ver|apply]` · `help`. 현장 저장이라 즉시 확정됩니다.
 - 휴대폰 연결 없이 Wi-Fi 연결 상태로 5분이 지나면 설정 모드가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
 - **BLE 는 설정 모드 동안만 켭니다.** Wi-Fi 와 무선부(2.4GHz)를 나눠 쓰기 때문에, 휴대폰이 연결된 동안에는 Wi-Fi 지연이 늘 수 있습니다. 설정 모드가 닫히면 BT 컨트롤러를 완전히 내려 평상시 성능에는 영향이 없습니다. 운용 중 호기는 **AGV 정지 상태에서** 여세요.
 - ESP32-S3 는 BLE 만 지원합니다. 클래식 블루투스(SPP) 전용 앱으로는 보이지 않습니다.
@@ -211,11 +213,12 @@ cfg 7 reboot
 메인보드에 상주 부트로더(플래시 섹터 A)를 넣고, 브리지가 서버에서 받은 이미지를 UART 로 프로그래밍합니다. 설계·규격은 [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md), 부트로더·앱 수정·CCS 설정은 [dsp/README.md](dsp/README.md).
 
 ```
-dspota 7 stage app_1.2.3.dspfw        # (BridgeTest) 스테이징 — 주행 중에도 가능, 브리지가 dspfw 파티션에 보관
-dspota 7 apply                        # 정지 상태에서 적용: 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
+dspota 7 stage app_1.2.3.dspfw apply  # (BridgeTest) 스테이징(브리지 dspfw 파티션에 보관) 후 바로 적용 — AGV 정지 상태에서
+                                      #   적용: 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
 info 7                                # 메인보드 앱/부트로더 버전, 스테이징 상태
 ```
 
+- 스테이징만 하고(`apply` 없이) 따로 `dspota 7 apply` 를 보내면 지금은 `job_mismatch` 로 거부됩니다. BridgeTest 가 명령마다 새 job 번호를 쓰기 때문입니다(BridgeTest 수정 전까지). `dsp apply`(브리지 콘솔, 또는 BridgeTest 에서 `cfg 7 dsp apply`)는 job 검사 없이 적용합니다.
 - 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
 - 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 `apply` 하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
 - 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다.
@@ -233,7 +236,7 @@ info 7                                # 메인보드 앱/부트로더 버전, �
 
 ```bash
 cd tools
-dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | cfg <agv> [cmd] | hb | quit
+dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <dspfw|url> [apply] | dspota <agv> apply | hb | quit
 ```
 
 ## 적용 전 확인·다음 단계

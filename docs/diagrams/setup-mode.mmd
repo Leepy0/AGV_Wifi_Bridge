@@ -1,0 +1,20 @@
+flowchart LR
+  o1["저장된 설정 없이 부팅<br/>첫 설치 · defaults 뒤"] --> ON
+  o2["BOOT 버튼 3초"] --> ON
+  o3["setup on<br/>USB 콘솔 · 서버 원격"] --> ON
+  o4["BLE 에서 reboot 한 뒤<br/>결과 확인용으로 다시 열림"] --> ON
+  ON(["<b>설정 모드</b> · BLE 켜짐<br/>이름 AGVBR-호기-MAC 끝 4자리<br/>login agvsetup"])
+  ON --> c1["setup off"]
+  ON --> c2["휴대폰 연결 없이<br/>Wi-Fi 연결 상태로 5분"]
+  ON --> c3["전원 재투입 · 콘솔이나<br/>서버의 reboot<br/>(저장된 설정이 있을 때)"]
+  c1 --> OFF
+  c2 --> OFF
+  c3 --> OFF
+  OFF(["<b>닫힘</b> · BLE 완전히 꺼짐<br/>Wi-Fi 가 무선부 단독 사용"])
+  ON -.- N["Wi-Fi 미연결이면<br/>5분이 지나도 닫지 않음"]
+  classDef on fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef off fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef note fill:#fef3c7,stroke:#d97706,color:#0f172a
+  class ON on
+  class OFF off
+  class N note
