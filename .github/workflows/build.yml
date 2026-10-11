@@ -1,20 +1,53 @@
 # ESP-IDF 빌드 → 플래시용 바이너리 묶음(zip) 업로드
 #  - main 푸시 / 수동 실행: Actions 아티팩트
 #  - v* 태그 푸시        : GitHub Release 에 첨부 (다운로드 URL 고정)
+#  - 수동 실행 release=true: CMakeLists.txt 의 PROJECT_VER 로 vX.Y.Z 태그와 GitHub Release 를 만든다
+#                          (태그 push 가 막힌 환경용. 같은 태그가 다른 커밋에 이미 있으면 실패)
+#  - 모든 빌드 전에 host-test (gcc 호스트 시험 + dsp_pack.py selftest) 통과 필요
 name: build
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'PROJECT_VER 로 vX.Y.Z 태그 + GitHub Release 발행'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+# 정식 발행은 한 번에 하나만, 취소하지 않음. PR 빌드는 새 푸시가 오면 이전 것을 취소
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' && inputs.release) && 'release' || format('build-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
+  host-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # 부트로더(섹터 A, OTA 로 못 바꿈)·브리지 공용 프로토콜, 앱 업데이트 진입 판정, 부트로더 진입 시뮬레이션,
+      # 패커 selftest·기준 .dspfw 재현 (tests/host/run.sh)
+      - name: Host tests (gcc + python3)
+        run: |
+          gcc --version | head -1
+          python3 --version
+          bash tests/host/run.sh
+
+  build:
+    needs: host-test
+    runs-on: ubuntu-latest
+    env:
+      RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,11 +57,29 @@ jobs:
           BASE=$(grep -oP 'set\(PROJECT_VER "\K[^"]+' CMakeLists.txt)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VER="${GITHUB_REF_NAME#v}"
+          elif [[ "$RELEASE" == "true" ]]; then
+            VER="$BASE"
           else
             VER="${BASE}-${GITHUB_SHA::7}"
           fi
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "version: $VER"
+
+      # 수동 정식 발행: 버전 형식 확인, 같은 태그가 다른 커밋을 가리키면 중단 (같은 커밋이면 재실행으로 보고 계속)
+      - name: Release tag check
+        if: env.RELEASE == 'true'
+        run: |
+          VER="${{ steps.ver.outputs.ver }}"
+          TAG="v$VER"
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::PROJECT_VER '$VER' 가 X.Y.Z 형식이 아님"; exit 1
+          fi
+          # 주석 태그는 ^{} 로 가리키는 커밋을 얻는다
+          REMOTE=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | sort -k2 | tail -1 | cut -f1)
+          if [[ -n "$REMOTE" && "$REMOTE" != "$GITHUB_SHA" ]]; then
+            echo "::error::태그 $TAG 가 이미 다른 커밋($REMOTE)에 있음 — CMakeLists.txt 의 PROJECT_VER 를 올리세요"; exit 1
+          fi
+          echo "tag $TAG → $GITHUB_SHA ${REMOTE:+(이미 있음, 같은 커밋)}"
 
       - name: ESP-IDF build
         uses: espressif/esp-idf-ci-action@v1
@@ -88,10 +139,13 @@ jobs:
           name: agv_wifi_bridge_${{ steps.ver.outputs.ver }}
           path: dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/
 
-      - name: Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      # v* 태그 푸시, 또는 수동 실행 release=true (태그가 없으면 이 커밋에 만든다)
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v') || env.RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.ver }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin
