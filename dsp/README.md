@@ -89,6 +89,7 @@ tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
 2. `python tools/dsp_flash.py COM5 app.dspfw` 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
 3. 앱에서 `F3107V000` 프레임에 `R3107V…` 응답, `F3107U000` 에 `R3107UOK00` 후 부트로더 진입 확인 (`dsp_flash.py COM5 --query 7`, `dsp_flash.py COM5 app.dspfw --enter 7`).
    safe 콜백 없이 빌드한 앱은 `R3107UNG09` 로 거부해야 한다.
+   `fwup_handle()` 이 없는 구 앱이 프레임을 보내는 중이면 브리지 적용은 원시 모드에 들어가지 않고 `app_no_fwup` 으로 끝나야 한다(중계 유지).
 4. 브리지 연결 → 서버(BridgeTest) `dspota 7 stage app.dspfw apply`(스테이징 후 바로 적용) → `done` 보고와 heartbeat `dsp` 버전 확인.
    스테이징 뒤 따로 `dspota 7 apply` 를 보내면 BridgeTest 수정 전까지 `job_mismatch` 로 거부된다(명령마다 새 job 번호). 다시 적용할 때는 `cfg 7 dsp apply`(브리지 콘솔은 `dsp apply`) — job 검사 없이 적용.
    같은 `stage … apply` 를 다시 보내도 새 job 번호라 다시 받고 굽는다.
