@@ -639,7 +639,7 @@ idf.py menuconfig
    ```bash
    python tools/dsp_flash.py COM5 --hello
    ```
-   `boot_ver` 에 부트로더 버전(`1.0.0`)이, `app_valid` 에 `False` 가 나오면 정상입니다. 앱이 아직 없어 부트로더가 업데이트 모드로 기다리는 중입니다.
+   `boot_ver` 에 부트로더 버전(`1.1.0`, 0.5.1 이전 소스로 구웠으면 `1.0.0`)이, `app_valid` 에 `False` 가 나오면 정상입니다. 앱이 아직 없어 부트로더가 업데이트 모드로 기다리는 중입니다.
 
 **② 재링크한 앱 굽기 (JTAG)** — [dsp/README.md](../dsp/README.md) 2장.
 

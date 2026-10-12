@@ -128,7 +128,7 @@ jobs:
           TXT
           cd dist && zip -r "agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip" "agv_wifi_bridge_${{ steps.ver.outputs.ver }}"
           ls -l
-          # 앱 크기 / OTA 슬롯(0x1E0000) 사용률을 실행 요약에 표시
+          # 앱 크기 / OTA 슬롯(0x1C0000) 사용률을 실행 요약에 표시
           APP=$(stat -c %s "agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin")
           SLOT=$((0x1C0000))
           {

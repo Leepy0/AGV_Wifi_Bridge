@@ -1,7 +1,7 @@
 #pragma once
 // 부트로더 설정 — 메인보드 앱과 같은 클럭 값을 쓴다 (표준: 20MHz 크리스탈, PLL ×10/2 = 100MHz)
 
-#define BOOT_VER_CHARS      '1', '.', '0', '.', '0'     // 부트로더 버전 (정보 블록·HELLO 응답)
+#define BOOT_VER_CHARS      '1', '.', '1', '.', '0'     // 부트로더 버전 (정보 블록·HELLO 응답). 1.1.0 = 0.5.2 소스(HELLO 창·60초 시한·수신 오류 복구), 1.0.0 = 0.5.1 이전
 
 #define OSC_HZ              20000000UL
 #define PLLCR_DIV           10          // PLLCR.DIV: SYSCLK = OSC × DIV / 2 (DIVSEL = 2)

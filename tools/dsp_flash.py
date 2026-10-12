@@ -112,7 +112,7 @@ class Boot:
     def read(self, addr, n):
         r = self.xfer(CMD_READ, struct.pack("<IH", addr, n))
         if r[0] == 1:
-            raise RuntimeError("READ: BAD_ADDR — 플래시 0x3E8000~0x3F7FFF·OTP 0x3D7800~0x3D7BFF 만 읽을 수 있음")
+            raise RuntimeError("READ: BAD_ADDR — 플래시 0x3E8000~0x3F7FF7(CSM 암호 영역 제외)·OTP 0x3D7800~0x3D7BFF 만 읽을 수 있음")
         if r[0] != 0:
             raise RuntimeError(f"READ: {ST.get(r[0], r[0])}")
         return list(struct.unpack_from(f"<{n}H", r, 1))
