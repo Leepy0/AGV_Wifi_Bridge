@@ -4,13 +4,14 @@
   dsp_flash.py COM5 app.dspfw            # 앱 프로그래밍 (HELLO → ERASE → WRITE → 헤더 → VERIFY → RESET)
   dsp_flash.py COM5 app.dspfw --enter 7  # 먼저 07호기 앱에 F…U000 프레임으로 부트로더 진입 요청
   dsp_flash.py COM5 --hello              # 부트로더 응답·앱 유효성 확인
-  dsp_flash.py COM5 --read 0x3E8000 64   # 플래시 읽기 (진단)
+  dsp_flash.py COM5 --read 0x3E8000 64   # 플래시·OTP 읽기 (진단, 최대 128 워드)
   dsp_flash.py COM5 --query 7            # 앱에 F…V000 버전 조회
 
 프로토콜: dsp/common/bootproto.h, 프레임: docs/DSP_OTA_DESIGN.md 5절. pyserial 필요 (pip install pyserial).
 """
 import argparse
 import os
+import random
 import struct
 import sys
 import time
@@ -34,7 +35,9 @@ STX, ETX = b"\x02", b"\x03"
 class Boot:
     def __init__(self, port, baud=115200):
         self.s = serial.Serial(port, baud, timeout=0.05)
-        self.seq = 0
+        # 실행마다 seq 시작값을 바꾼다 — 부트로더는 같은 (seq, cmd, 요청 CRC) 재전송에 이전 응답을 돌려주므로
+        # 연속 실행한 두 도구가 같은 seq 로 시작하면 낡은 응답을 받을 수 있다
+        self.seq = random.randrange(256)
 
     def xfer(self, cmd, payload=b"", timeout=1.0, retries=3):
         self.seq = (self.seq + 1) & 0xFF
@@ -108,6 +111,8 @@ class Boot:
 
     def read(self, addr, n):
         r = self.xfer(CMD_READ, struct.pack("<IH", addr, n))
+        if r[0] == 1:
+            raise RuntimeError("READ: BAD_ADDR — 플래시 0x3E8000~0x3F7FF7(CSM 암호 영역 제외)·OTP 0x3D7800~0x3D7BFF 만 읽을 수 있음")
         if r[0] != 0:
             raise RuntimeError(f"READ: {ST.get(r[0], r[0])}")
         return list(struct.unpack_from(f"<{n}H", r, 1))

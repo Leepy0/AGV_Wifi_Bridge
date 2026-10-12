@@ -1,18 +1,21 @@
+%%{init: {"sequence": {"mirrorActors": true, "width": 190, "actorMargin": 70}}}%%
 sequenceDiagram
   autonumber
   participant OP as 운용자
   participant GW as 게이트웨이
   participant ESP as 브리지
-  OP->>GW: 통신 로그 · 설정 명령 "set ip …" · CFG_CMD 전송
+  OP->>GW: 통신 로그 · 호기 칸 입력 · 설정 명령 "set ip …"
   GW->>ESP: CFG_CMD 0x40
-  ESP-->>GW: CFG_RESULT 0x41 "ok ip - 'save' then 'reboot' to apply"
-  OP->>GW: 설정 명령 "save"
-  ESP->>ESP: 지금 설정 백업 · 새 설정 저장 (확인 대기)
-  OP->>GW: 설정 명령 "reboot"
-  ESP->>ESP: 재부팅 · cfg=trial · 180초 시계 시작
+  ESP-->>GW: CFG_RESULT 0x41<br/>"ok ip - 'save' then 'reboot' to apply"
+  OP->>GW: "save" (확인창)
+  Note over GW,ESP: 브리지: 지금 설정 백업<br/>새 설정 저장 (확인 대기)
+  ESP-->>GW: "saved (trial) - 'reboot' to apply …"
+  OP->>GW: "reboot" (확인창)
+  Note over GW,ESP: 메인보드를 굽는 중이면 reboot 거부<br/>busy · mainboard programming
+  Note over GW,ESP: 브리지 재부팅 · cfg=trial · 180초 시계 시작
   ESP-->>GW: heartbeat cfg=trial (새 주소에서)
-  OP->>GW: 호기 현황 · 그 호기 행 · PING (180초 안에)
-  GW->>ESP: PING 0x20
-  ESP->>ESP: 새 설정 확정 · 백업 삭제
+  GW->>ESP: 자동 PING 0x20<br/>호기당 5초에 한 번
+  Note over OP,GW: 운용자가 할 일 없음 · 통신 로그에<br/>"자동 PING (cfg=trial …) — 확정용"
+  Note over GW,ESP: 브리지: 새 설정 확정 · 백업 삭제
   ESP-->>GW: heartbeat cfg=saved
-  Note over GW,ESP: 서버 패킷 없이 180초가 지나면 이전 설정으로 복구하고 재부팅
+  Note over GW,ESP: 서버 패킷 없이 180초가 지나면<br/>이전 설정으로 복구하고 재부팅<br/>(새 설정으로 서버에 닿지 못한 경우)

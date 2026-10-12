@@ -15,6 +15,7 @@ hex2000 Intel HEX 는 --memwidth=16 --romwidth=16 일 때 주소가 워드 단�
 상위 바이트 → 하위 바이트 순으로 기록된다 (실측). 바이트 주소(0x7D0000 대)로 나오면 거부한다.
 """
 import argparse
+import re
 import struct
 import sys
 import time
@@ -29,6 +30,10 @@ VER_WORDS      = 32
 BLOCK_WORDS    = 128
 FILE_MAGIC     = b"AGVDSP1\0"
 FILE_HDR_LEN   = 32
+# 버전 문자열 규칙: 앱 R 응답의 버전 칸이 8자 고정(app_fwupdate.c)이고 브리지·서버가 그 값을 이미지 버전과 비교하므로
+# 8자를 넘으면 굽기는 성공해도 서버가 '버전 다름'으로 실패 처리한다. 빈 문자열·공백도 막는다.
+VER_RE         = re.compile(r"[0-9A-Za-z._-]{1,8}")
+VER_RULE       = "영문·숫자·. _ - 로 1~8자 (예: 1.2.3)"
 
 
 # ───────── CRC (dsp_image.c 와 동일 규칙: 워드마다 하위 바이트 → 상위 바이트) ─────────
@@ -113,9 +118,14 @@ def parse_intel_hex(path: str) -> dict:
 
 # ───────── 이미지 ─────────
 
+def check_ver(ver: str) -> str:
+    if not isinstance(ver, str) or VER_RE.fullmatch(ver) is None:
+        raise ValueError(f"버전 문자열 {ver!r} 은 쓸 수 없음 — {VER_RULE}")
+    return ver
+
+
 def build_header(app_len: int, app_crc: int, build_time: int, ver: str, flags: int = 0) -> list:
-    if len(ver.encode("ascii")) > VER_WORDS - 1:
-        raise ValueError("버전 문자열은 31자 이하")
+    check_ver(ver)
     hdr = [0xFFFF] * HDR_WORDS
     hdr[0], hdr[1], hdr[2], hdr[3] = MAGIC0, MAGIC1, HDR_VER, flags
     hdr[4], hdr[5] = app_len & 0xFFFF, app_len >> 16
@@ -146,6 +156,7 @@ def parse_header(hdr: list) -> dict:
 
 
 def pack(mem: dict, ver: str, build_time: int) -> bytes:
+    check_ver(ver)
     bad = [a for a in mem if not (APP_HDR_ADDR <= a < APP_END)]
     if bad:
         raise ValueError(f"앱 영역(0x{APP_HDR_ADDR:X}~0x{APP_END - 1:X}) 밖의 데이터 {len(bad)}워드: 0x{min(bad):X}... "
@@ -192,6 +203,7 @@ def unpack(data: bytes) -> dict:
     info = parse_header(hdr)
     pos = FILE_HDR_LEN + HDR_WORDS * 2
     blocks = []
+    nxt = APP_CODE_ADDR   # 블록은 주소 오름차순·겹침 없음 (브리지 dap_image_check_blocks, 게이트웨이 DspfwImage.Parse 와 같은 규칙)
     while pos < len(data):
         addr, n = struct.unpack_from("<IH", data, pos)
         pos += 6
@@ -199,6 +211,9 @@ def unpack(data: bytes) -> dict:
             raise ValueError(f"블록 손상 @{pos}")
         if not (APP_CODE_ADDR <= addr and addr + n <= APP_END):
             raise ValueError(f"블록 주소 범위 밖: 0x{addr:X}")
+        if addr < nxt:
+            raise ValueError(f"블록 순서·겹침 오류: 0x{addr:X} < 0x{nxt:X}")
+        nxt = addr + n
         blocks.append((addr, list(struct.unpack_from(f"<{n}H", data, pos))))
         pos += n * 2
     # 블록으로 복원한 코드의 CRC 가 헤더와 맞는지
@@ -266,6 +281,41 @@ def cmd_selftest(a):
         except ValueError as e:
             assert "바이트 주소" in str(e), e
     print("intel hex parse ok (word addresses accepted, byte addresses rejected)")
+    # 버전 문자열 규칙 (8자 고정 R 응답 칸에 들어가야 서버 비교가 맞음)
+    for good in ("1.2.3", "12345678", "v1_0-rc", "A"):
+        check_ver(good)
+        build_header(1, 0, 0, good)
+    for bad in ("", "1.2.3-rc1", "1.2 3", " 1.2", "1.2.3\t", "버전", "1/2", "1.2.3\n"):
+        try:
+            build_header(1, 0, 0, bad)
+            raise AssertionError(f"버전 {bad!r} 을 거부해야 함")
+        except ValueError as e:
+            assert "버전 문자열" in str(e), e
+    mem1 = {APP_CODE_ADDR: 0x1234}
+    try:
+        pack(mem1, "1.2.3-rc1", 0)
+        raise AssertionError("pack 이 9자 버전을 거부해야 함")
+    except ValueError:
+        pass
+    img = pack(mem1, "1.2.3", 1700000000)
+    info = unpack(img)
+    assert info["ver"] == "1.2.3" and info["app_len"] == 1 and img[16:24] == b"1.2.3\0\0\0", info
+    print("version rule ok (1~8 chars of [0-9A-Za-z._-])")
+    # 블록 순서: 같은 데이터라도 내림차순·겹친 블록은 거부 (브리지·게이트웨이와 같은 규칙)
+    img2 = pack({APP_CODE_ADDR: 0x1111, APP_CODE_ADDR + BLOCK_WORDS: 0x2222}, "1.2.3", 0)
+    blk = unpack(img2)["blocks"]
+    assert [a for a, _ in blk] == [APP_CODE_ADDR, APP_CODE_ADDR + BLOCK_WORDS], blk
+    def rebuild(order):
+        body = img2[FILE_HDR_LEN:FILE_HDR_LEN + HDR_WORDS * 2] + b"".join(struct.pack("<IH", a, len(ws)) + words_to_le(ws) for a, ws in order)
+        return FILE_MAGIC + struct.pack("<II", FILE_HDR_LEN + len(body), crc32_final(crc32_bytes(body))) + img2[16:FILE_HDR_LEN] + body
+    assert unpack(rebuild(blk))["blocks"] == blk
+    for order in (blk[::-1], [blk[0], (APP_CODE_ADDR + BLOCK_WORDS - 1, blk[1][1])]):
+        try:
+            unpack(rebuild(order))
+            raise AssertionError(f"블록 순서·겹침을 거부해야 함: {[hex(a) for a, _ in order]}")
+        except ValueError as e:
+            assert "순서" in str(e), e
+    print("block order ok (ascending, no overlap)")
     print("selftest ok")
 
 
@@ -275,13 +325,13 @@ def main():
     q = sp.add_parser("pack", help="Intel HEX → .dspfw")
     q.add_argument("hexfile")
     q.add_argument("-o", "--output", required=True)
-    q.add_argument("--ver", required=True, help="앱 버전 문자열 (31자 이하)")
+    q.add_argument("--ver", required=True, help=f"앱 버전 문자열: {VER_RULE}. R 응답 버전 칸이 8자라 더 길면 서버 비교 실패")
     q.add_argument("--build", help="빌드 시각 unix 초 (기본: 지금)")
     q.set_defaults(fn=cmd_pack)
     q = sp.add_parser("info", help=".dspfw 내용 표시·검증")
     q.add_argument("file")
     q.set_defaults(fn=cmd_info)
-    q = sp.add_parser("selftest", help="CRC 테스트 벡터")
+    q = sp.add_parser("selftest", help="CRC 테스트 벡터·HEX 파서·버전 규칙 검사")
     q.set_defaults(fn=cmd_selftest)
     a = p.parse_args()
     try:

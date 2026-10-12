@@ -284,8 +284,9 @@ static void handle_cfg_cmd(const struct sockaddr_in *src, uint16_t seq, const ui
     size_t m = cmd_exec(line, CMD_SRC_SERVER, out, sizeof(out), &act);
     send_pkt(src->sin_addr.s_addr, ntohs(src->sin_port), BR_T_CFG_RESULT, seq, (const uint8_t *)out, m);
     if (act == CMD_ACT_REBOOT) {
-        vTaskDelay(pdMS_TO_TICKS(300));     // 결과 패킷 송신 여유
-        esp_restart();
+        // 결과 패킷 송신 여유를 두고 설정 관리 태스크가 재부팅 (net_rx 를 막지 않음).
+        // cmd_exec 확인 뒤에 메인보드 굽기가 시작됐으면 끝날 때까지 미룸
+        setup_reboot(false);
     }
 }
 
@@ -336,16 +337,14 @@ static void net_rx_task(void *arg)
                 s_st.rx_foreign++;
                 break;
             }
-            char url[256];
-            size_t n = h.len < sizeof(url) - 1 ? h.len : sizeof(url) - 1;
-            memcpy(url, pl, n);
-            url[n] = '\0';
-            esp_err_t err = ota_start(url);
-            if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {   // busy 는 ota_start 가 직접 보고
-                char js[80];
-                int m = snprintf(js, sizeof(js), "{\"stage\":\"fail\",\"err\":\"%s\"}", esp_err_to_name(err));
-                net_send_ota_result((const uint8_t *)js, (size_t)m);
+            char url[257];
+            if (h.len >= sizeof(url)) {
+                url[0] = '\0';                 // 잘라 쓰지 않음 → ota_start 가 bad_url 로 거부·보고
+            } else {
+                memcpy(url, pl, h.len);
+                url[h.len] = '\0';
             }
+            ota_start(url);                     // 거부·실패 사유는 ota_start 가 직접 보고 (OTA_RESULT)
             break;
         }
         case BR_T_CFG_CMD:
@@ -382,9 +381,11 @@ static void net_rx_task(void *arg)
 // 주기 상태 보고 (서버에서 RSSI/로밍/오류 추이 기록용)
 static void hb_task(void *arg)
 {
-    char js[560];
+    char js[640];
     const char *fw   = esp_app_get_description()->version;
     const char *part = ota_running_partition();
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);    // INFO 와 같은 STA MAC — 서버가 같은 호기 번호 충돌을 판정
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(g_cfg.hb_ms));
@@ -399,10 +400,10 @@ static void hb_task(void *arg)
                             + r->overflow + r->rx_err + r->overlong;
 
         int n = snprintf(js, sizeof(js),
-                         "{\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
+                         "{\"fw\":\"%s\",\"mac\":\"" MACSTR "\",\"part\":\"%s\",\"ota\":\"%s\",\"up\":%lld,\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
                          "\"disc\":%lu,\"reason\":%u,\"m_rx\":%lu,\"m_tx\":%lu,\"r_rx\":%lu,"
                          "\"u_err\":%lu,\"n_off\":%lu,\"n_err\":%lu,\"heap\":%lu,\"cfg\":\"%s\",\"setup\":%d,",
-                         fw, part, ota_state_str(), (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
+                         fw, MAC2STR(mac), part, ota_state_str(), (long long)(esp_timer_get_time() / 1000000), ap.rssi, ap.primary, MAC2STR(ap.bssid),
                          (unsigned long)s_st.disconnects, s_st.last_reason,
                          (unsigned long)m->rx_frames, (unsigned long)m->tx_frames, (unsigned long)r->rx_frames,
                          u_err, (unsigned long)s_st.tx_offline, (unsigned long)s_st.tx_err,

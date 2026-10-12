@@ -69,7 +69,7 @@ static const struct {
     { NULL,     "rfid_port",   "RFID 송신 포트",                    "type=number min=1 max=65535 required" },
     { "시리얼", "main_baud",   "메인보드 보드레이트",               "type=number min=1200 max=1000000 required" },
     { NULL,     "rfid_baud",   "RFID 보드레이트",                   "type=number min=1200 max=1000000 required" },
-    { NULL,     "hb_ms",       "상태 보고 주기 ms (0 = 끔)",        "type=number min=0 max=60000 required" },
+    { NULL,     "hb_ms",       "상태 보고 주기 ms (0 = 끔, 100~2000)", "type=number min=0 max=2000 required" },
 };
 
 static const char PAGE_HEAD[] =

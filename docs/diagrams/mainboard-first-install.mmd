@@ -1,13 +1,13 @@
 flowchart TD
-  P0["준비 · 브리지 0.5.1 이상 · 새 파티션<br/>호기 현황 메인보드 열이 - 나 ⚠ 가 아님"] --> P1
-  P1["① 부트로더 · JTAG<br/>섹터 A 만 지우고 굽기"] --> C1{"dsp_flash.py COM5 --hello<br/>응답이 오나?"}
+  P0["준비 · 브리지 0.5.2 · 새 파티션<br/>호기 현황 메인보드 열이 - 나 ⚠ 가 아님"] --> P1
+  P1["① 부트로더 · JTAG · 현장 설치 전에<br/>브리지 0.5.2 의 dsp/boot 로 빌드 (1.1.0)<br/>섹터 A 만 지우고 굽기"] --> C1{{"dsp_flash.py COM5 --hello<br/>응답이 오고 bootloader 1.1.0 인가?"}}
   C1 -- 아니오 --> X1["dsp/README.md 1장 다시 확인<br/>Flash API · 클럭 · 링커 cmd"]
-  C1 -- 예 --> P2["② 재링크한 앱 · JTAG<br/>섹터 B~D 만 · 섹터 A 그대로<br/>fwup_handle · fwup_boot_ok 포함"]
-  P2 --> S2["앱 헤더가 비어 있음<br/>부트로더가 업데이트 모드로 대기<br/>메인보드 앱 버전은 ?"]
-  S2 --> P3["③ 첫 .dspfw 적용<br/>게이트웨이 메인보드 배포 작업<br/>또는 dsp_flash.py COM5 app.dspfw"]
-  P3 --> C3{"작업 완료 · 호기 현황<br/>메인보드 앱 / 부트 = 새 버전?"}
-  C3 -- 예 --> OK(["이후 메인보드 업데이트는<br/>게이트웨이 배포 작업으로"])
-  C3 -- 아니오 --> X3["작업 로그의 err 확인<br/>app_no_reply · ver_mismatch 면<br/>앱 지원 코드 · 버전 8자 확인"]
+  C1 -- 예 --> P2["② 재링크한 앱 · JTAG<br/>섹터 B~D 만 · 섹터 A 그대로<br/>fwup_handle (safe 콜백 필수)<br/>fwup_boot_ok · 워치독"]
+  P2 --> S2["앱 헤더가 비어 있음<br/>부트로더가 업데이트 모드로 계속 대기<br/>메인보드 앱 버전은 ?"]
+  S2 --> P3["③ 첫 .dspfw 적용<br/>게이트웨이 메인보드 배포 작업<br/>(버전 ? 라 일반 적용도<br/>HELLO 로 부트로더에 바로)<br/>또는 dsp_flash.py COM5 app.dspfw"]
+  P3 --> C3{{"작업 완료 · 호기 현황<br/>메인보드 앱 = 새 버전 · 부트로더 1.1.0?"}}
+  C3 -- 예 --> OK(["이후 메인보드 업데이트는<br/>게이트웨이 배포 작업으로<br/>스테이징 → 정지 확인 → 적용"])
+  C3 -- 아니오 --> X3["작업 로그의 err 확인<br/>app_no_reply · ver_mismatch 면<br/>앱 지원 코드 · 워치독 · 버전 8자 확인<br/>no_bootloader 면 배선 · --hello 다시 확인"]
   classDef ok fill:#dcfce7,stroke:#16a34a,color:#0f172a
   classDef bad fill:#fee2e2,stroke:#dc2626,color:#0f172a
   classDef wait fill:#fef3c7,stroke:#d97706,color:#0f172a

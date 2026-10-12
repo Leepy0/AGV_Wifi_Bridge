@@ -14,3 +14,4 @@ uint32_t  sble_session(void);               // 연결마다 증가 — 로그인
 bool      sble_take_subscribed(void);       // 앱이 알림을 구독함 (안내 문구 송신 시점)
 bool      sble_take_line(char *out, size_t cap);   // 받은 명령 한 줄 (없으면 false)
 void      sble_send(const char *s, size_t len);    // 결과 송신 (\n → \r\n, MTU 단위 분할)
+void      sble_disconnect(void);            // 지금 연결을 끊음 (광고는 계속 — 로그인 연속 실패 등)

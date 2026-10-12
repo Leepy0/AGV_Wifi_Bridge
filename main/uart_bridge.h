@@ -5,6 +5,8 @@
 #include "esp_err.h"
 
 #define FRAME_MAX 256
+// 메인보드 부트로더 SCI 속도 (dsp/boot/boot_cfg.h SCI_BAUD 와 같은 값). 원시 모드 동안 메인보드 UART 를 이 속도로 바꿈
+#define UART_BRIDGE_BOOT_BAUD 115200UL
 
 typedef enum { PORT_MAIN = 0, PORT_RFID = 1, PORT_COUNT } port_id_t;
 
@@ -29,7 +31,12 @@ bool uart_bridge_send_main(const uint8_t *data, size_t len);
 
 const uart_stat_t *uart_bridge_stat(port_id_t port);
 
+// 메인보드 앱 프레임(STX 로 시작)을 마지막으로 받은 뒤 지난 시간(ms). 받은 적 없으면 UINT32_MAX.
+// 원시 모드 중 수신(부트로더 응답)은 세지 않는다 — 메인보드 OTA 의 '앱은 살아 있으나 U 미지원' 판단용
+uint32_t uart_bridge_main_rx_age_ms(void);
+
 // 메인보드 UART 독점(원시 모드): 프레임 처리·RFID 바이패스·서버 하향을 멈추고 바이트 단위로 직접 읽고 씀 (DSP 프로그래밍용)
+//  raw_begin: 속도를 UART_BRIDGE_BOOT_BAUD(115200, 부트로더 고정)로 바꿈 / raw_end: g_cfg.main_baud 로 되돌림
 esp_err_t uart_bridge_raw_begin(void);
 void      uart_bridge_raw_end(void);
 int       uart_bridge_raw_read(uint8_t *buf, size_t n, uint32_t timeout_ms);   // 읽은 바이트 수

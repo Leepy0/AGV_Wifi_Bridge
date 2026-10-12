@@ -6,9 +6,11 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "app_config.h"
 #include "uart_bridge.h"
+#include "bootproto.h"
 
 static const char *TAG = "uart";
 
@@ -29,6 +31,13 @@ static const char *TAG = "uart";
 #define RX_TASK_PRIO   12
 #define TX_TASK_PRIO   13
 #define BRIDGE_CORE    1        // Wi-Fi/lwIP 는 core 0
+#define RAW_TX_DONE_MS 200      // 원시 모드 전환 전 송신 완료 대기
+#define APP_FRAME_MIN  8        // 앱 프레임 최소 길이: STX 종류 PAN MSG AGV(2) ... ETX
+#define STX_CHAR       0x02
+
+#ifdef BP_BAUD
+_Static_assert(BP_BAUD == UART_BRIDGE_BOOT_BAUD, "bootloader baud mismatch (bootproto.h vs uart_bridge.h)");
+#endif
 
 typedef struct {
     uart_port_t   uart;
@@ -48,6 +57,9 @@ typedef struct {
 static port_ctx_t    s_port[PORT_COUNT];
 static QueueHandle_t s_main_txq;
 static volatile bool s_raw;         // 메인보드 UART 원시 모드 (DSP 프로그래밍)
+// 마지막 앱 프레임 수신 시각 (ms, esp_timer 기준). 32비트 한 번 쓰기라 다른 태스크에서 읽어도 찢기지 않음
+static volatile uint32_t s_main_rx_ms;
+static volatile bool     s_main_rx_seen;
 
 // 프레임 종료 판단용 무수신 시간(ms) → UART RX TOUT 심볼 수
 static uint8_t gap_to_symbols(uint32_t baud, uint32_t gap_ms)
@@ -71,6 +83,11 @@ static void emit(port_ctx_t *p, const uint8_t *buf, size_t *len)
     }
     p->st.rx_frames++;
     p->st.rx_bytes += *len;
+    // 메인보드 앱 생존 판단용: STX 로 시작하는 앱 프레임만 (원시 모드 중 부트로더 응답·노이즈는 제외)
+    if (p == &s_port[PORT_MAIN] && !s_raw && *len >= APP_FRAME_MIN && buf[0] == STX_CHAR) {
+        s_main_rx_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        s_main_rx_seen = true;
+    }
     p->cb(buf, *len);
     *len = 0;
 }
@@ -275,6 +292,14 @@ const uart_stat_t *uart_bridge_stat(port_id_t port)
     return &s_port[port].st;
 }
 
+uint32_t uart_bridge_main_rx_age_ms(void)
+{
+    if (!s_main_rx_seen) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)(esp_timer_get_time() / 1000) - s_main_rx_ms;     // 부호 없는 뺄셈: 49일 랩어라운드에도 맞음
+}
+
 esp_err_t uart_bridge_raw_begin(void)
 {
     if (s_raw) {
@@ -282,18 +307,31 @@ esp_err_t uart_bridge_raw_begin(void)
     }
     s_raw = true;
     xQueueReset(s_main_txq);                                // 대기 중 프레임 폐기
-    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(200));       // 송신 중인 프레임 완료
+    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(RAW_TX_DONE_MS));   // 송신 중인 프레임 완료
+    // 부트로더는 SCI 속도가 고정(115200) — 앱 링크 속도(main_baud)를 바꿔 운용하는 호기도 부트로더와 통신되게
+    esp_err_t err = uart_set_baudrate(MAIN_UART, UART_BRIDGE_BOOT_BAUD);
     uart_flush_input(MAIN_UART);
-    ESP_LOGW(TAG, "main UART raw mode on (bridge paused)");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set bootloader baud failed: %s", esp_err_to_name(err));
+        uart_bridge_raw_end();
+        return err;
+    }
+    ESP_LOGW(TAG, "main UART raw mode on (bridge paused, %lu bps)", (unsigned long)UART_BRIDGE_BOOT_BAUD);
     return ESP_OK;
 }
 
 void uart_bridge_raw_end(void)
 {
+    // 마지막 부트로더 패킷(RESET 등)이 다 나간 뒤 앱 속도로 되돌림 — TX 버퍼 0 이라 write 는 FIFO 적재까지만 기다림
+    uart_wait_tx_done(MAIN_UART, pdMS_TO_TICKS(RAW_TX_DONE_MS));
+    esp_err_t err = uart_set_baudrate(MAIN_UART, g_cfg.main_baud);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "restore baud %lu failed: %s", (unsigned long)g_cfg.main_baud, esp_err_to_name(err));
+    }
     uart_flush_input(MAIN_UART);
     xQueueReset(s_port[PORT_MAIN].evq);
     s_raw = false;
-    ESP_LOGI(TAG, "main UART raw mode off");
+    ESP_LOGI(TAG, "main UART raw mode off (%lu bps)", (unsigned long)g_cfg.main_baud);
 }
 
 int uart_bridge_raw_read(uint8_t *buf, size_t n, uint32_t timeout_ms)
