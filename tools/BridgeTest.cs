@@ -10,6 +10,7 @@
 //   dspota 7 apply                    → 스테이징된 이미지 적용 (AGV 정지 상태에서)
 //   dspota 7 apply recover            → 구조 적용: 기동 불능 앱 복구 (브리지가 HELLO 를 50ms 간격으로 계속 보내는 동안
 //                                       메인보드 전원을 다시 넣으면 부트로더의 부팅 직후 HELLO 창으로 진입)
+//                                       앱이 프레임을 계속 보내는데 U 에 응답하지 않으면(구 앱) recover 여도 app_no_fwup 으로 끝남
 //   info 7                            → 장치 정보 (ESP/메인보드 버전, 스테이징 상태)
 using System.Buffers.Binary;
 using System.Collections.Concurrent;

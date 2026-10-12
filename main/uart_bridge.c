@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "app_config.h"
 #include "uart_bridge.h"
@@ -31,6 +32,8 @@ static const char *TAG = "uart";
 #define TX_TASK_PRIO   13
 #define BRIDGE_CORE    1        // Wi-Fi/lwIP 는 core 0
 #define RAW_TX_DONE_MS 200      // 원시 모드 전환 전 송신 완료 대기
+#define APP_FRAME_MIN  8        // 앱 프레임 최소 길이: STX 종류 PAN MSG AGV(2) ... ETX
+#define STX_CHAR       0x02
 
 #ifdef BP_BAUD
 _Static_assert(BP_BAUD == UART_BRIDGE_BOOT_BAUD, "bootloader baud mismatch (bootproto.h vs uart_bridge.h)");
@@ -54,6 +57,9 @@ typedef struct {
 static port_ctx_t    s_port[PORT_COUNT];
 static QueueHandle_t s_main_txq;
 static volatile bool s_raw;         // 메인보드 UART 원시 모드 (DSP 프로그래밍)
+// 마지막 앱 프레임 수신 시각 (ms, esp_timer 기준). 32비트 한 번 쓰기라 다른 태스크에서 읽어도 찢기지 않음
+static volatile uint32_t s_main_rx_ms;
+static volatile bool     s_main_rx_seen;
 
 // 프레임 종료 판단용 무수신 시간(ms) → UART RX TOUT 심볼 수
 static uint8_t gap_to_symbols(uint32_t baud, uint32_t gap_ms)
@@ -77,6 +83,11 @@ static void emit(port_ctx_t *p, const uint8_t *buf, size_t *len)
     }
     p->st.rx_frames++;
     p->st.rx_bytes += *len;
+    // 메인보드 앱 생존 판단용: STX 로 시작하는 앱 프레임만 (원시 모드 중 부트로더 응답·노이즈는 제외)
+    if (p == &s_port[PORT_MAIN] && !s_raw && *len >= APP_FRAME_MIN && buf[0] == STX_CHAR) {
+        s_main_rx_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        s_main_rx_seen = true;
+    }
     p->cb(buf, *len);
     *len = 0;
 }
@@ -279,6 +290,14 @@ bool uart_bridge_send_main(const uint8_t *data, size_t len)
 const uart_stat_t *uart_bridge_stat(port_id_t port)
 {
     return &s_port[port].st;
+}
+
+uint32_t uart_bridge_main_rx_age_ms(void)
+{
+    if (!s_main_rx_seen) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)(esp_timer_get_time() / 1000) - s_main_rx_ms;     // 부호 없는 뺄셈: 49일 랩어라운드에도 맞음
 }
 
 esp_err_t uart_bridge_raw_begin(void)

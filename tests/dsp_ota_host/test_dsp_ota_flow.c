@@ -65,12 +65,14 @@ esp_err_t esp_partition_erase_range(const esp_partition_t *p, size_t off, size_t
 
 // ───────── 메인보드 흉내: 앱 + 부트로더(bootproto.c) ─────────
 
-typedef enum { APP_OK, APP_SILENT, APP_NG, APP_DEAD } app_mode_t;
+// APP_SILENT: 앱 멈춤 (F 무응답, 앱 프레임 없음) / APP_OLD: 살아 있는 구 앱 (F 를 모름, E/A 프레임은 계속 보냄)
+typedef enum { APP_OK, APP_SILENT, APP_NG, APP_DEAD, APP_OLD } app_mode_t;
 static app_mode_t m_app;        // 앱 동작 (BOOT 가 아닐 때)
 static bool m_boot;             // 부트로더 업데이트 모드
 static bool m_tx_ok = true;     // uart_bridge_send_main 성공 여부 (false = tx 큐 가득)
 static int64_t m_power_on_at = -1;   // APP_DEAD: 이 시각에 전원 재투입 → 200ms 동안 HELLO 를 받으면 부트로더
 static int m_raw_begins;
+static int m_hellos;            // 원시 모드로 보낸 HELLO 패킷 수
 static int m_drop_write_resp;   // WRITE 응답을 이 횟수만큼 버림 (노이즈)
 static int m_drop_after_writes; // WRITE 이 횟수 이후부터 버리기 시작
 static int m_writes;
@@ -110,7 +112,7 @@ bool uart_bridge_send_main(const uint8_t *d, size_t n)
     if (!m_tx_ok) return false;
     if (m_boot || n < 8 || d[1] != 'F') return true;
     char msg = (char)d[3], cmd = (char)d[6];
-    if (m_app == APP_SILENT || m_app == APP_DEAD) return true;
+    if (m_app == APP_SILENT || m_app == APP_DEAD || m_app == APP_OLD) return true;
     if (cmd == 'V') {
         char b[32];
         snprintf(b, sizeof(b), "V%-8s%-8s%-8s", m_app_ver, "B1", "20261011");
@@ -124,6 +126,13 @@ bool uart_bridge_send_main(const uint8_t *d, size_t n)
     return true;
 }
 
+// 앱 프레임 수신 경과: 살아 있는 앱(부트로더 아님)은 E/A 프레임을 계속 보낸다
+uint32_t uart_bridge_main_rx_age_ms(void)
+{
+    bool alive = !m_boot && (m_app == APP_OK || m_app == APP_NG || m_app == APP_OLD);
+    return alive ? 300 : UINT32_MAX;
+}
+
 esp_err_t uart_bridge_raw_begin(void) { m_raw_begins++; return ESP_OK; }
 void uart_bridge_raw_end(void) {}
 
@@ -131,6 +140,7 @@ static void (*m_on_raw)(void);      // 원시 송신 때 1회 불림 (굽는 중
 void uart_bridge_raw_write(const uint8_t *b, size_t n)
 {
     if (m_on_raw) { void (*f)(void) = m_on_raw; m_on_raw = NULL; f(); }
+    if (n >= 5 && b[0] == BP_SOF0 && b[1] == BP_SOF1 && b[4] == BP_CMD_HELLO) m_hellos++;
     if (!m_boot && m_app == APP_DEAD && m_power_on_at >= 0 && m_now >= m_power_on_at && m_now < m_power_on_at + 200000) {
         m_boot = true;                  // 리셋 직후 200ms 안에 HELLO → 업데이트 모드 (결정 8B)
         bp_init(&m_bp, &m_ops);
@@ -248,12 +258,13 @@ static void stage_raw(uint32_t len, uint32_t job)
 
 static void reset_board(app_mode_t app, const char *ver)
 {
-    m_app = app; m_boot = false; m_tx_ok = true; m_power_on_at = -1; m_raw_begins = 0;
+    m_app = app; m_boot = false; m_tx_ok = true; m_power_on_at = -1; m_raw_begins = 0; m_hellos = 0;
     m_drop_write_resp = 0; m_drop_after_writes = 0; m_writes = 0; m_rxh = m_rxt = 0;
     strcpy(m_app_ver, ver);
     for (int i = 0; i < 0xC000; i++) m_flash[i] = 0x1111;     // 옛 앱 (지워지면 0xFFFF)
     m_nrep = 0;
     strlcpy(s_dsp_ver, ver, sizeof(s_dsp_ver));
+    strlcpy(s_dsp_build, strcmp(ver, "?") == 0 ? "?" : "20261011", sizeof(s_dsp_build));
 }
 
 static bool s_flash_untouched(void);
@@ -315,6 +326,7 @@ static void t_apply_basic(void)
     const char *e = apply(12, false);
     CHECK(e && strcmp(e, "app_no_reply") == 0);
     CHECK(m_raw_begins == 0 && s_stage.magic[0] && s_flash_untouched());
+    CHECK(strcmp(s_dsp_ver, "?") == 0 && strcmp(s_dsp_build, "?") == 0);     // R1: 옛 버전을 계속 보고하지 않음
     // B-01: 송신 실패 (tx 큐 가득) → uart_busy 즉시, 원시 모드 안 들어감
     reset_board(APP_OK, "1.0");
     m_tx_ok = false;
@@ -416,6 +428,67 @@ static void t_wait_power(void)
     stage_raw(n, 42);
     e = apply(42, false);
     CHECK(e && strcmp(e, "no_bootloader") == 0 && count_rep("\"wait_power\"") == 0);
+}
+
+static void t_alive_check(void)
+{
+    printf("-- U 무응답 때 앱 생존 판단 (R1 / R15)\n");
+    uint32_t n = mkimg("1.2.3", NULL, 3000, 128);
+    // (a) 살아 있는 구 앱 (프레임 수신 중) + U 무응답 → app_no_fwup, 원시 모드 0회 — recover 여도
+    reset_board(APP_OLD, "?");
+    stage_raw(n, 80);
+    int64_t t0 = m_now;
+    const char *e = apply(80, true);
+    CHECK(e && strcmp(e, "app_no_fwup") == 0);
+    CHECK(m_raw_begins == 0 && m_hellos == 0 && count_rep("\"wait_power\"") == 0 && s_flash_untouched());
+    CHECK(s_stage.magic[0] && m_now - t0 < 3 * 1000000LL);
+    reset_board(APP_OLD, "?");
+    stage_raw(n, 81);
+    e = apply(81, false);
+    CHECK(e && strcmp(e, "app_no_fwup") == 0 && m_raw_begins == 0);
+    reset_board(APP_OLD, "1.2.0");                  // 버전을 알아도 같음, 앱이 살아 있으므로 버전 유지
+    stage_raw(n, 82);
+    e = apply(82, false);
+    CHECK(e && strcmp(e, "app_no_fwup") == 0 && m_raw_begins == 0 && strcmp(s_dsp_ver, "1.2.0") == 0);
+
+    // (b) 앱 침묵 + 버전 앎 + recover 없음 → app_no_reply, 버전 '?' (heartbeat 가 '?' 보고)
+    reset_board(APP_SILENT, "1.2.0");
+    stage_raw(n, 83);
+    e = apply(83, false);
+    CHECK(e && strcmp(e, "app_no_reply") == 0 && m_raw_begins == 0);
+    CHECK(strcmp(s_dsp_ver, "?") == 0 && strcmp(s_dsp_build, "?") == 0);
+    char b[300];
+    dsp_ota_status_json(b, sizeof(b));
+    CHECK(strstr(b, "\"dsp\":\"?\"") != NULL);
+    //     R1 시나리오: 멈춘 앱이 워치독 리셋을 반복해 부트로더가 업데이트 모드에 있음 → 다음 배포('?')는 HELLO 로 바로 구움
+    m_boot = true; bp_init(&m_bp, &m_ops); m_nrep = 0;
+    CHECK(apply(83, false) == NULL && strcmp(s_dsp_ver, "1.2.3") == 0);
+    //     앱이 실제로는 살아 있었다면 재조회로 버전이 돌아옴
+    reset_board(APP_SILENT, "1.2.0");
+    stage_raw(n, 84);
+    e = apply(84, false);
+    CHECK(e && strcmp(e, "app_no_reply") == 0 && strcmp(s_dsp_ver, "?") == 0);
+    m_app = APP_OK;
+    CHECK(query_version() && strcmp(s_dsp_ver, "1.2.0") == 0 && strcmp(s_dsp_build, "20261011") == 0);
+    //     버전 조회 무응답 → '?' (수동 dsp ver 도 옛 버전을 남기지 않음)
+    m_app = APP_SILENT;
+    CHECK(!query_version() && strcmp(s_dsp_ver, "?") == 0 && strcmp(s_dsp_build, "?") == 0);
+
+    // (c) 앱 침묵 + '?' + recover 없음 → 원시 모드 HELLO 3회만 (약 4.5초), wait_power 없음
+    reset_board(APP_DEAD, "?");
+    stage_raw(n, 85);
+    t0 = m_now;
+    e = apply(85, false);
+    CHECK(e && strcmp(e, "no_bootloader") == 0);
+    CHECK(m_raw_begins == 1 && m_hellos == RETRIES && count_rep("\"wait_power\"") == 0);
+    CHECK(m_now - t0 < 8 * 1000000LL && s_flash_untouched());
+
+    // (d) 앱 침묵 + recover → HELLO 3회 뒤 wait_power (버전을 알아도)
+    reset_board(APP_DEAD, "1.2.0");
+    stage_raw(n, 86);
+    m_power_on_at = m_now + 15 * 1000000LL;
+    CHECK(apply(86, true) == NULL && strcmp(s_dsp_ver, "1.2.3") == 0);
+    CHECK(m_raw_begins == 1 && count_rep("\"wait_power\"") >= 1 && m_hellos > RETRIES);
 }
 
 static void t_start_cmd(void)
@@ -605,6 +678,7 @@ int main(int argc, char **argv)
     t_apply_validate();
     t_retry();
     t_wait_power();
+    t_alive_check();
     t_start_cmd();
     t_duplicate();
     t_json_safe();

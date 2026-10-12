@@ -30,6 +30,7 @@ static const char *TAG = "dsp_ota";
 #define TASK_STACK          8192
 #define TASK_PRIO           2           // 중계 태스크보다 낮게
 #define APP_REPLY_MS        2000        // 앱 F→R 응답 대기
+#define APP_ALIVE_MS        3000        // U 무응답 때 이 시간 안에 앱 프레임을 받았으면 '앱은 살아 있으나 U 미지원'
 #define BOOT_START_MS       400         // UOK 후 워치독 리셋 → 부트로더 기동 여유
 #define RESP_MS             800         // 부트로더 일반 응답
 #define HELLO_MS            1500        // 첫 HELLO (앱 리셋 → 부트로더 기동 직후, 3회 재시도 = 4.5초)
@@ -67,7 +68,7 @@ typedef struct {
     char       ver[16];
     uint32_t   crc32;       // 서버가 준 파일 CRC (0 = 미지정)
     uint32_t   size;        // 서버가 준 파일 크기 (0 = 미지정)
-    bool       recover;     // 복구 적용: 앱이 U 에 응답하지 않아도 부트로더로 직행, HELLO 실패 시 전원 재투입 대기
+    bool       recover;     // 복구 적용: 앱이 침묵(U 무응답·앱 프레임 없음)하면 부트로더로 직행, HELLO 실패 시 전원 재투입 대기
     char       url[200];    // 199자 초과는 url_too_long 으로 거부 (잘라 쓰지 않음)
 } cmd_t;
 
@@ -218,12 +219,24 @@ bool dsp_ota_observe(const uint8_t *frame, size_t len)
     return false;
 }
 
+// 앱 버전을 모름으로 되돌린다: heartbeat 가 '?' 를 보고하고, dsp_task 가 VER_QUERY_RETRY_S 마다 다시 조회한다
+// (앱이 살아 있으면 버전이 돌아옴)
+static void ver_unknown(void)
+{
+    strlcpy(s_dsp_ver, "?", sizeof(s_dsp_ver));
+    strlcpy(s_dsp_build, "?", sizeof(s_dsp_build));
+}
+
 static bool query_version(void)
 {
     dap_reply_t r;
     s_last_query_us = esp_timer_get_time();
-    if (app_query('V', &r) != 0) {
-        return false;
+    int q = app_query('V', &r);
+    if (q != 0) {
+        if (q == -1) {
+            ver_unknown();      // 무응답: 옛 버전을 계속 보고하지 않게 '?' 로 (수동 'dsp ver' 도 같은 규칙, 이후 주기 재조회)
+        }
+        return false;           // 송신 실패(-2)는 일시적 — 버전 유지
     }
     strlcpy(s_dsp_ver,   r.app_ver[0]  ? r.app_ver  : "-", sizeof(s_dsp_ver));
     strlcpy(s_dsp_boot,  r.boot_ver[0] ? r.boot_ver : "-", sizeof(s_dsp_boot));
@@ -552,15 +565,20 @@ static int wait_power(uint32_t job, uint8_t *resp)
 
 // 스테이징 이미지로 메인보드 프로그래밍 1회. NULL = 성공, 아니면 오류 문자열.
 //  enter   : 앱에 U(업데이트 진입) 요청부터. false = 지운 뒤 재시도 (부트로더가 업데이트 모드에 있으므로 HELLO 부터)
-//  recover : 복구 적용 — U 무응답이어도 HELLO 로 직행, HELLO 실패 시 전원 재투입 대기
+//  recover : 복구 적용 — 앱이 침묵하면 HELLO 로 직행, HELLO 실패 시 전원 재투입 대기
 //  *erased : ERASE 를 보냈으면 true (이후 실패는 메인보드에 앱이 없음 → HELLO 부터 재시도 대상)
+// U 무응답일 때:
+//  - 최근 APP_ALIVE_MS 안에 앱 프레임을 받음 → 앱은 살아 있으나 업데이트 진입 미지원(구 앱): app_no_fwup (recover 여도 원시 모드 안 감)
+//  - 앱 침묵 + recover          → 원시 모드 HELLO 3회 → 실패 시 wait_power (최대 WAIT_POWER_S)
+//  - 앱 침묵 + 버전 모름('?')   → 원시 모드 HELLO 3회만 (약 4.5초), 실패 시 no_bootloader
+//  - 앱 침묵 + 버전 앎          → app_no_reply, 버전을 '?' 로 (재조회로 앱이 살아 있으면 돌아옴)
 static const char *program(uint32_t job, const uint16_t *apphdr, const dspimg_hdr_t *ah, bool enter, bool recover, bool *erased)
 {
     uint8_t resp[BP_MAX_PAYLOAD];
     uint8_t pl[BP_MAX_PAYLOAD];
 
     // 1. 앱에 업데이트 진입 요청 (정지 상태 확인은 앱이 함).
-    //    응답이 없을 때 부트로더로 직행(원시 모드 = RFID·ACS 중계 끊김)은 복구 적용이거나 앱 버전을 모를 때만
+    //    응답이 없을 때 부트로더로 직행(원시 모드 = RFID·ACS 중계 끊김)은 앱이 침묵하고, 복구 적용이거나 앱 버전을 모를 때만
     if (enter) {
         report(job, "enter", -1, NULL, NULL);
         dap_reply_t r;
@@ -575,9 +593,14 @@ static const char *program(uint32_t job, const uint16_t *apphdr, const dspimg_hd
                 return why;
             }
             vTaskDelay(pdMS_TO_TICKS(BOOT_START_MS));
+        } else if (uart_bridge_main_rx_age_ms() <= APP_ALIVE_MS) {
+            ESP_LOGW(TAG, "no U reply but app frames are flowing - app does not support update entry");
+            return "app_no_fwup";
         } else if (recover || strcmp(s_dsp_ver, "?") == 0) {
-            ESP_LOGW(TAG, "no U reply - trying bootloader directly (%s)", recover ? "recover" : "app version unknown");
+            ESP_LOGW(TAG, "no U reply, app silent - trying bootloader directly (%s)", recover ? "recover" : "app version unknown");
         } else {
+            ESP_LOGW(TAG, "no U reply, app silent - app version reset to '?'");
+            ver_unknown();
             return "app_no_reply";
         }
     }
@@ -607,8 +630,7 @@ static const char *program(uint32_t job, const uint16_t *apphdr, const dspimg_hd
     // 3. 지우기 — 이 뒤로는 메인보드에 앱이 없다: 실패해도 heartbeat 가 옛 버전을 보고하지 않게 '?' 로
     report(job, "erase", -1, NULL, NULL);
     pl[0] = BP_ERASE_APP;
-    strlcpy(s_dsp_ver, "?", sizeof(s_dsp_ver));
-    strlcpy(s_dsp_build, "?", sizeof(s_dsp_build));
+    ver_unknown();
     *erased = true;
     if (bl_xfer(BP_CMD_ERASE, pl, 1, resp, ERASE_MS) != 1 || resp[0] != BP_ST_OK) {
         err = "erase";

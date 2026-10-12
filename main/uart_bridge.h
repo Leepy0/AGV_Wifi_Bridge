@@ -31,6 +31,10 @@ bool uart_bridge_send_main(const uint8_t *data, size_t len);
 
 const uart_stat_t *uart_bridge_stat(port_id_t port);
 
+// 메인보드 앱 프레임(STX 로 시작)을 마지막으로 받은 뒤 지난 시간(ms). 받은 적 없으면 UINT32_MAX.
+// 원시 모드 중 수신(부트로더 응답)은 세지 않는다 — 메인보드 OTA 의 '앱은 살아 있으나 U 미지원' 판단용
+uint32_t uart_bridge_main_rx_age_ms(void);
+
 // 메인보드 UART 독점(원시 모드): 프레임 처리·RFID 바이패스·서버 하향을 멈추고 바이트 단위로 직접 읽고 씀 (DSP 프로그래밍용)
 //  raw_begin: 속도를 UART_BRIDGE_BOOT_BAUD(115200, 부트로더 고정)로 바꿈 / raw_end: g_cfg.main_baud 로 되돌림
 esp_err_t uart_bridge_raw_begin(void);
