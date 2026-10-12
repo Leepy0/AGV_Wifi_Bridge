@@ -81,24 +81,25 @@ tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
    - HEX 는 반드시 `--memwidth=16 --romwidth=16`(워드 주소) 로 뽑는다 — 바이트 주소 HEX 는 패커가 거부한다.
 7. 첫 설치(1회, 유선): 부트로더(섹터 A) + 재링크한 앱(섹터 B~D) 을 JTAG 으로 굽고, 앱 헤더가 비어 있으므로
    **처음 한 번은 브리지(또는 PC 에서 `tools/dsp_flash.py`)로 .dspfw 를 적용**해서 헤더를 채운다.
-   헤더가 없으면 부트로더는 앱을 무효로 보고 업데이트 모드에서 기다린다. 게이트웨이에서는 앱 버전이 `?` 라 복구 적용으로 진행된다.
+   헤더가 없으면 부트로더는 앱을 무효로 보고 업데이트 모드에서 기다린다. 게이트웨이에서는 앱 버전이 `?` 이고 앱 프레임도 없으므로, 일반 적용으로도 브리지가 HELLO 로 부트로더에 바로 들어간다('복구 적용' 은 필요 없다).
 
 ## 3. 벤치 검증 순서
 
-1. 부트로더만 굽고 리셋 → SCI-A 115200 으로 HELLO 응답 확인 (`python tools/dsp_flash.py COM5 --hello`).
+1. 부트로더만 굽고 리셋 → SCI-A 115200 으로 HELLO 응답 확인 (`python tools/dsp_flash.py COM5 --hello` → `boot_ver  : 1.1.0`, `app_valid : False` 등 항목별 한 줄).
 2. `python tools/dsp_flash.py COM5 app.dspfw` 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
 3. 앱에서 `F3107V000` 프레임에 `R3107V…` 응답, `F3107U000` 에 `R3107UOK00` 후 부트로더 진입 확인 (`dsp_flash.py COM5 --query 7`, `dsp_flash.py COM5 app.dspfw --enter 7`).
    safe 콜백 없이 빌드한 앱은 `R3107UNG09` 로 거부해야 한다.
-   `fwup_handle()` 이 없는 구 앱이 프레임을 보내는 중이면 브리지 적용은 원시 모드에 들어가지 않고 `app_no_fwup` 으로 끝나야 한다(중계 유지).
+   `fwup_handle()` 이 없는 구 앱이 프레임을 보내는 중이면(최근 3초 안에 STX 프레임) 브리지 적용은 원시 모드에 들어가지 않고 `app_no_fwup` 으로 끝나야 한다(중계 유지, `recover` 여도 같음).
+   앱이 프레임을 3초보다 드물게 보내면 브리지는 앱이 조용하다고 본다. 이때 버전을 알면 `app_no_reply` 로 끝나고 `dsp` 가 `?` 로 바뀌어야 한다.
 4. 브리지 연결 → 서버(BridgeTest) `dspota 7 stage app.dspfw apply`(스테이징 후 바로 적용) → `done` 보고와 heartbeat `dsp` 버전 확인.
-   스테이징 뒤 따로 `dspota 7 apply` 를 보내면 BridgeTest 수정 전까지 `job_mismatch` 로 거부된다(명령마다 새 job 번호). 다시 적용할 때는 `cfg 7 dsp apply`(브리지 콘솔은 `dsp apply`) — job 검사 없이 적용.
-   같은 `stage … apply` 를 다시 보내도 새 job 번호라 다시 받고 굽는다.
+   스테이징만 한 뒤(`apply` 없이) `dspota 7 apply` 를 보내면 그 호기에 마지막으로 stage 한 job 번호로 적용한다. BridgeTest 를 다시 띄웠으면 `dspota 7 apply <job>` 으로 `info 7`·heartbeat 의 `staged.job` 을 준다(다르면 `job_mismatch`).
+   같은 job 의 APPLY 는 10분 동안 마지막 결과만 다시 보고하므로, 실패 뒤 다시 적용할 때는 `stage … apply` 를 다시 보내거나(새 job 번호라 다시 받고 굽는다) `cfg 7 dsp apply`(브리지 콘솔은 `dsp apply`, job 검사 없음)를 쓴다.
 5. 실패 주입: 쓰는 중 전원 차단 → 재부팅 시 부트로더 대기 → 다시 적용으로 복구. 잘못된 파일·CRC 오류·블록 구조 오류 → 메인보드를 지우기 전에 거부(`image_crc`·`image_bad`·`ver_invalid`).
 6. 기동 불능 앱: `fwup_boot_ok()` 를 부르지 않는(또는 바로 워치독 리셋되는) 앱을 올림 → 리셋 3회 뒤 HELLO 에 응답(업데이트 모드) → 정상 앱 적용으로 복구.
 7. 브리지 재부팅 주입: WRITE 도중 브리지 `reboot` → 다음 적용의 HELLO 가 첫 시도에 응답하는지 (파서 재동기, SCI 수신 오류 복구). 메인보드 전원을 다시 넣지 않아도 이어져야 한다.
    0.5.2 브리지는 굽는 중 `reboot` 을 거부하므로 이 시험은 브리지 전원이나 RESET 버튼으로 끊는다.
-8. 멈춘 앱 복구: 워치독을 끄고 무한 대기하는 앱을 올림 → 게이트웨이에서 그 호기에 작업(앱 버전 `?` → 복구 적용) → `wait_power` 가 뜨면 메인보드 전원을 껐다 켬 → 굽기가 이어져 `done`.
+8. 멈춘 앱 복구: 워치독을 끄고 무한 대기하는 앱을 올림 → 일반 적용은 `app_no_reply`(버전을 알던 경우) 또는 `no_bootloader`(버전 `?`)로 끝나야 한다 → 게이트웨이에서 **복구 적용** 을 켠 새 작업(BridgeTest 는 `dspota 7 stage app.dspfw` 로 새로 스테이징한 뒤 `dspota 7 apply recover`) → `wait_power` 가 뜨면 메인보드 전원을 껐다 켬 → 굽기가 이어져 `done`.
 9. 부트플래그 60초: `--enter 7` 로 부트로더에 넣은 뒤 패킷을 보내지 않음 → 약 60초 뒤 앱으로 돌아오는지.
 10. 부팅 지연: 정상 앱의 리셋 → 앱 시작까지 약 0.2초 늘어난 것을 확인하고, 앱의 기동 시간 조건과 충돌하지 않는지 본다.
 
-호스트 시험(실기 없이): `bash tests/host/run.sh` — 프로토콜·재동기·재전송 판정·READ 범위, `fwup_handle` 판정과 브리지 프레임 계약, 가상 하드웨어 위의 `boot_main.c`(HELLO 창 200ms·부트플래그 60초/600초·앱 무효 무기한 대기·부트 카운터·수신 오류 재동기), `dsp_pack.py` selftest 와 기준 .dspfw 재현.
+호스트 시험(실기 없이): `bash tests/host/run.sh` — 프로토콜·재동기·재전송 판정·READ 범위, `fwup_handle` 판정과 브리지 프레임 계약, 가상 하드웨어 위의 `boot_main.c`(HELLO 창 200ms·부트플래그 60초/600초·앱 무효 무기한 대기·부트 카운터·수신 오류 재동기), `dsp_pack.py` selftest(블록 역순·겹침 거부 포함)와 기준 .dspfw 재현.

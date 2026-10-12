@@ -31,7 +31,8 @@ var showHb = false;
 // 테스트용 작업 번호 — 실행마다 다른 값에서 시작 (브리지 0.5.2 는 같은 번호의 START/APPLY 를 중복으로 보고 다시 받거나 굽지 않음)
 // 게이트웨이와 같은 방식: (유닉스 초 % 10,000,000) × 100, u32 범위 안
 var dspJob = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() % 10_000_000) * 100;
-var stagedJob = new Dictionary<int, int>();   // 호기별 마지막 stage 의 job — apply 는 같은 job 으로 보내야 함 (다르면 job_mismatch)
+var stagedJob = new Dictionary<int, int>();   // 호기별 마지막 stage 의 job — apply 는 같은 job 으로 보내야 함 (다르면 job_mismatch). 한 번 적용하면 지움:
+                                              // 같은 job 의 APPLY 는 브리지가 10분 동안 이전 결과만 다시 보내므로(다시 굽지 않음) 다시 하려면 stage 부터
 
 using var mainSock = OpenUdp(MainPort);
 using var rfidSock = OpenUdp(RfidPort);
@@ -130,7 +131,7 @@ while (Console.ReadLine() is { } line)
                 var recover = sub.Skip(1).Contains("recover");
                 int job;
                 if (sub.Length >= 2 && int.TryParse(sub[^1], out var given)) job = given;
-                else if (!stagedJob.TryGetValue(ag.Id, out job)) { Log($"[{ag.Id:D2}] 먼저 'dspota {ag.Id} stage …' — 또는 'dspota {ag.Id} apply [recover] <job>' (heartbeat staged.job)"); break; }
+                else if (!stagedJob.Remove(ag.Id, out job)) { Log($"[{ag.Id:D2}] 먼저 'dspota {ag.Id} stage …' (이미 적용한 job 을 다시 보내면 브리지는 이전 결과만 다시 보냄) — 또는 'dspota {ag.Id} apply [recover] <job>' (heartbeat staged.job)"); break; }
                 json = recover ? $"{{\"job\":{job},\"recover\":1}}" : $"{{\"job\":{job}}}";
                 if (recover) Log($"[{ag.Id:D2}] 구조 적용: 브리지가 HELLO 를 반복 송신하는 동안 메인보드 전원을 껐다 켜세요");
                 var pkt = Proto.Build(Proto.DspOtaApply, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
@@ -157,7 +158,7 @@ while (Console.ReadLine() is { } line)
                     extra = $",\"crc32\":{crc},\"size\":{data.Length}";
                 }
                 var job = ++dspJob;
-                stagedJob[ag.Id] = job;
+                if (apply == 0) stagedJob[ag.Id] = job; else stagedJob.Remove(ag.Id);   // stage … apply 는 받자마자 굽는다
                 json = $"{{\"url\":\"{url}\",\"ver\":\"{ver}\",\"job\":{job},\"apply\":{apply}{extra}}}";
                 var pkt = Proto.Build(Proto.DspOtaStart, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
                 mainSock.Send(pkt, pkt.Length, ag.Ep);

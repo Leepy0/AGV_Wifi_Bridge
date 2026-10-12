@@ -33,7 +33,7 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 
 **포트 확인·연결 실패 대처·호기 설정·동작 확인까지 단계별 절차는 [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md)** (zip 에도 그림과 함께 포함)를 보세요.
 
-zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridge.bin`(OTA 용 앱만), bootloader / partition-table / ota_data 개별 파일, `flash_args`, `FLASH_GUIDE.md` 와 `images/`.
+zip 내용: `agv_wifi_bridge_merged.bin`(전체 이미지, 0x0), `agv_wifi_bridge.bin`(OTA 용 앱만), bootloader / partition-table / ota_data 개별 파일, `flash_args`, `flash.bat` · `flash.sh`, `FLASH_GUIDE.md` 와 `images/`, 요약 `README.txt`.
 
 ## 개발 환경
 
@@ -261,8 +261,8 @@ dspota 7 stage app_1.2.3.dspfw apply  # (BridgeTest) 스테이징(브리지 dspf
 info 7                                # 메인보드 앱/부트로더 버전, 스테이징 상태
 ```
 
-- BridgeTest 에서 스테이징만 하고(`apply` 없이) 따로 `dspota 7 apply` 나 `dspota 7 apply recover` 를 보내면 `job_mismatch` 로 거부됩니다(아무것도 스테이징돼 있지 않으면 `not_staged`). BridgeTest 가 명령마다 새 job 번호를 쓰기 때문입니다(BridgeTest 수정 전까지). `dsp apply`(브리지 콘솔, 또는 BridgeTest 에서 `cfg 7 dsp apply`)는 job 검사 없이 적용합니다.
-- 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
+- BridgeTest 에서 스테이징만 하고(`apply` 없이) 나중에 `dspota 7 apply`(복구 적용은 `dspota 7 apply recover`)를 보내면, 그 도구로 마지막에 stage 한 job 번호를 그대로 씁니다. BridgeTest 를 다시 띄웠으면 `dspota 7 apply 180145124` 처럼 `info 7` · heartbeat 의 `staged.job` 번호를 끝에 붙입니다. 번호가 다르면 `job_mismatch`, 스테이징된 이미지가 없으면 `not_staged` 로 거부됩니다. 같은 번호로 이미 적용했다면 10분 동안은 그 결과만 다시 옵니다. 실패 뒤 다시 하려면 `dspota 7 stage …` 로 새로 스테이징한 뒤 `apply`(또는 `apply recover`)를 보냅니다. `dsp apply`(브리지 콘솔, 또는 BridgeTest 에서 `cfg 7 dsp apply`)는 job 검사 없이 적용합니다.
+- 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. `dsp_pack.py info` 와 `dsp_flash.py` 는 파일을 읽을 때 블록이 주소 오름차순이고 겹치지 않는지 검사합니다(브리지 · 게이트웨이와 같은 규칙). 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
 - 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 적용하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
 - 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다. 앱은 안전 확인 콜백을 반드시 넘겨야 하고, 넘기지 않으면 진입을 항상 거부(`app_ng_09`)합니다.
 - 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply`.
@@ -275,8 +275,10 @@ info 7                                # 메인보드 앱/부트로더 버전, �
 | 항목 | 0.5.2 동작 |
 |---|---|
 | 메인보드 속도 | 굽는 동안 J4 를 115200(부트로더 고정 속도)으로 바꿨다가 끝나면 `main_baud` 로 되돌립니다. `main_baud` 가 115200 이 아닌 호기도 메인보드 OTA 가 됩니다 |
-| 앱 무응답 | 앱이 `U`(업데이트 진입)에 응답하지 않으면 먼저 앱이 살아 있는지 봅니다. 최근 3초 안에 앱 프레임이 왔으면(업데이트 진입을 모르는 구 앱) `app_no_fwup`, 앱이 조용하고 버전을 알면 `app_no_reply` 로 끝내고 버전을 `?` 로 바꿉니다. 둘 다 중계를 끊지 않습니다. 부트로더로 바로 가는 것은 앱이 조용하고, 복구 적용(`recover:1`)이거나 앱 버전이 `?` 일 때뿐입니다 |
-| 복구 적용 | `recover:1` 인데 부트로더도 HELLO 에 응답하지 않으면 60초 동안 HELLO 를 50ms 간격으로 보내며 10초마다 `wait_power` 를 보고합니다. 그동안 메인보드 전원을 껐다 켜면 부트로더가 받아 굽기를 이어 갑니다 (0.5.2 부트로더 필요) |
+| 앱 무응답 | 앱이 `U`(업데이트 진입)에 2초 안에 응답하지 않으면 앱이 살아 있는지 봅니다. 최근 3초 안에 앱 프레임(STX 로 시작하는 프레임)이 왔으면 업데이트 진입을 모르는 구 앱으로 보고 `app_no_fwup` 으로 끝냅니다. 앱이 조용하고 버전을 알면 `app_no_reply` 로 끝내고 버전을 `?` 로 바꿉니다. 둘 다 중계를 끊지 않습니다. 부트로더로 바로 가는 것은 앱이 조용하고, 복구 적용(`recover:1`)이거나 앱 버전이 `?` 일 때뿐입니다 |
+| 버전 `?` | 버전 조회(`V`)에 응답이 없으면 `dsp` · `dsp_build` 를 `?` 로 바꾸고 60초마다 다시 묻습니다(콘솔 `dsp ver` 포함). 앱이 살아 있으면 버전이 돌아옵니다. 앱이 조용한 `?` 호기는 일반 적용도 HELLO 3번(약 4.5초)으로 부트로더를 찾습니다. 앱이 지워져 부트로더가 기다리는 호기(첫 설치, 굽다가 실패)는 이것으로 굽힙니다 |
+| 복구 적용 | `recover:1` 인데 부트로더도 HELLO 에 응답하지 않으면 60초 동안 HELLO 를 50ms 간격으로 보내며 10초마다 `wait_power` 를 보고합니다. 그동안 메인보드 전원을 껐다 켜면 부트로더가 받아 굽기를 이어 갑니다 (0.5.2 부트로더 필요). 게이트웨이 0.3.0 은 운용자가 새 작업에서 **복구 적용** 을 켠 작업에만 `recover:1` 을 보냅니다. 버전이 `?` 라는 것만으로는 붙이지 않습니다 |
+| 부트로더 버전 | 0.5.2 소스의 부트로더는 `1.1.0` 으로 보고합니다(이전 소스는 `1.0.0`). 게이트웨이 **메인보드 앱 / 부트** 열이 `… / 1.0.0` 이면 옛 부트로더라 JTAG 으로 다시 굽습니다 |
 | 자동 재시도 | 지운 뒤 실패하면 HELLO 부터 최대 2번 다시 굽습니다(`retry` 보고) |
 | 이미지 검사 | 받을 때 머리 160B 를 먼저 검사해 잘못된 이미지로 기존 스테이징을 지우지 않습니다. 블록 구조·복원 CRC 를 스테이징 때와 **메인보드를 지우기 전**에 다시 봅니다 (`ver_invalid`, `image_bad`) |
 | 스테이징 URL | 호스트가 `server` IP 여야 하고(리다이렉트 포함, `url_host`), 199자를 넘으면 `url_too_long` |
@@ -294,10 +296,10 @@ info 7                                # 메인보드 앱/부트로더 버전, �
 
 ```bash
 cd tools
-dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <dspfw|url> [apply] | dspota <agv> apply [recover] | hb | quit
+dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping <agv> [n] | ota <agv> <bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <dspfw|url> [apply] | dspota <agv> apply [recover] [job] | hb | quit
 ```
 
-- BridgeTest 의 메인보드 작업 번호는 실행할 때마다 다른 값에서 시작합니다. 브리지 0.5.2 가 같은 번호의 명령을 중복으로 보고 다시 처리하지 않기 때문입니다.
+- BridgeTest 의 메인보드 작업 번호는 실행할 때마다 다른 값에서 시작합니다. 브리지 0.5.2 가 같은 번호의 명령을 중복으로 보고 다시 처리하지 않기 때문입니다. `stage` 는 새 번호를 쓰고, `apply` 는 그 호기에 마지막으로 stage 한 번호를 다시 씁니다.
 - `dspota <agv> stage <URL>` 로 외부 URL 을 주면 브리지가 `url_host` 로 거부합니다. 이 PC 가 서비스하는 파일(경로를 주는 방식)만 됩니다.
 - BridgeTest 와 게이트웨이는 같은 PC 에서 함께 띄우지 않습니다. 둘 다 UDP 50000 을 씁니다.
 
