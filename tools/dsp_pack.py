@@ -203,6 +203,7 @@ def unpack(data: bytes) -> dict:
     info = parse_header(hdr)
     pos = FILE_HDR_LEN + HDR_WORDS * 2
     blocks = []
+    nxt = APP_CODE_ADDR   # 블록은 주소 오름차순·겹침 없음 (브리지 dap_image_check_blocks, 게이트웨이 DspfwImage.Parse 와 같은 규칙)
     while pos < len(data):
         addr, n = struct.unpack_from("<IH", data, pos)
         pos += 6
@@ -210,6 +211,9 @@ def unpack(data: bytes) -> dict:
             raise ValueError(f"블록 손상 @{pos}")
         if not (APP_CODE_ADDR <= addr and addr + n <= APP_END):
             raise ValueError(f"블록 주소 범위 밖: 0x{addr:X}")
+        if addr < nxt:
+            raise ValueError(f"블록 순서·겹침 오류: 0x{addr:X} < 0x{nxt:X}")
+        nxt = addr + n
         blocks.append((addr, list(struct.unpack_from(f"<{n}H", data, pos))))
         pos += n * 2
     # 블록으로 복원한 코드의 CRC 가 헤더와 맞는지
@@ -297,6 +301,21 @@ def cmd_selftest(a):
     info = unpack(img)
     assert info["ver"] == "1.2.3" and info["app_len"] == 1 and img[16:24] == b"1.2.3\0\0\0", info
     print("version rule ok (1~8 chars of [0-9A-Za-z._-])")
+    # 블록 순서: 같은 데이터라도 내림차순·겹친 블록은 거부 (브리지·게이트웨이와 같은 규칙)
+    img2 = pack({APP_CODE_ADDR: 0x1111, APP_CODE_ADDR + BLOCK_WORDS: 0x2222}, "1.2.3", 0)
+    blk = unpack(img2)["blocks"]
+    assert [a for a, _ in blk] == [APP_CODE_ADDR, APP_CODE_ADDR + BLOCK_WORDS], blk
+    def rebuild(order):
+        body = img2[FILE_HDR_LEN:FILE_HDR_LEN + HDR_WORDS * 2] + b"".join(struct.pack("<IH", a, len(ws)) + words_to_le(ws) for a, ws in order)
+        return FILE_MAGIC + struct.pack("<II", FILE_HDR_LEN + len(body), crc32_final(crc32_bytes(body))) + img2[16:FILE_HDR_LEN] + body
+    assert unpack(rebuild(blk))["blocks"] == blk
+    for order in (blk[::-1], [blk[0], (APP_CODE_ADDR + BLOCK_WORDS - 1, blk[1][1])]):
+        try:
+            unpack(rebuild(order))
+            raise AssertionError(f"블록 순서·겹침을 거부해야 함: {[hex(a) for a, _ in order]}")
+        except ValueError as e:
+            assert "순서" in str(e), e
+    print("block order ok (ascending, no overlap)")
     print("selftest ok")
 
 
