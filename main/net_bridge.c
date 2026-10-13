@@ -441,11 +441,13 @@ size_t net_format_status(char *buf, size_t cap)
 {
     esp_netif_ip_info_t ip = {0};
     wifi_ap_record_t ap = {0};
+    uint8_t mac[6] = {0};
     bool up = net_is_up();
 
     if (cap == 0) {
         return 0;
     }
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);    // 이 브리지의 STA MAC (INFO·heartbeat 의 mac 과 같음)
     if (s_netif) {
         esp_netif_get_ip_info(s_netif, &ip);
     }
@@ -453,9 +455,9 @@ size_t net_format_status(char *buf, size_t cap)
         esp_wifi_sta_get_ap_info(&ap);
     }
     int n = snprintf(buf, cap,
-                     "wifi: %s ip=" IPSTR " rssi=%d ch=%u bssid=" MACSTR "\n"
+                     "wifi: %s mac=" MACSTR " ip=" IPSTR " rssi=%d ch=%u bssid=" MACSTR "\n"
                      "net : tx=%lu tx_err=%lu tx_offline=%lu rx=%lu rx_bad=%lu rx_foreign=%lu disc=%lu last_reason=%u\n",
-                     up ? "UP" : "DOWN", IP2STR(&ip.ip), ap.rssi, ap.primary, MAC2STR(ap.bssid),
+                     up ? "UP" : "DOWN", MAC2STR(mac), IP2STR(&ip.ip), ap.rssi, ap.primary, MAC2STR(ap.bssid),
                      (unsigned long)s_st.tx_pkts, (unsigned long)s_st.tx_err, (unsigned long)s_st.tx_offline,
                      (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
                      (unsigned long)s_st.disconnects, s_st.last_reason);
@@ -464,7 +466,7 @@ size_t net_format_status(char *buf, size_t cap)
 
 void net_print_status(void)
 {
-    char buf[256];
+    char buf[320];
     net_format_status(buf, sizeof(buf));
     fputs(buf, stdout);
 }
