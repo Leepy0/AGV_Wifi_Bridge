@@ -149,6 +149,37 @@ static int cmd_dsp(int argc, char **argv)
     return 0;
 }
 
+static int cmd_log(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: log <none|error|warn|info|debug|verbose>\n"
+               "sets the runtime log level for all components (not saved across reboot)\n");
+        return 1;
+    }
+
+    esp_log_level_t level;
+    if (strcmp(argv[1], "none") == 0) {
+        level = ESP_LOG_NONE;
+    } else if (strcmp(argv[1], "error") == 0) {
+        level = ESP_LOG_ERROR;
+    } else if (strcmp(argv[1], "warn") == 0 || strcmp(argv[1], "warning") == 0) {
+        level = ESP_LOG_WARN;
+    } else if (strcmp(argv[1], "info") == 0) {
+        level = ESP_LOG_INFO;
+    } else if (strcmp(argv[1], "debug") == 0) {
+        level = ESP_LOG_DEBUG;
+    } else if (strcmp(argv[1], "verbose") == 0) {
+        level = ESP_LOG_VERBOSE;
+    } else {
+        printf("invalid level: %s\n", argv[1]);
+        return 1;
+    }
+
+    esp_log_level_set("*", level);
+    printf("runtime log level set to %s\n", argv[1]);
+    return 0;
+}
+
 static int cmd_mon(int argc, char **argv)
 {
     if (argc == 2) {
@@ -187,6 +218,7 @@ void console_start(void)
         { .command = "reboot",   .help = "restart",                             .func = cmd_reboot },
         { .command = "stat",     .help = "wifi / network / uart counters",      .func = cmd_stat },
         { .command = "mon",      .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
+        { .command = "log",      .help = "log <none|error|warn|info|debug|verbose> : runtime log level", .func = cmd_log },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
         { .command = "setup",    .help = "setup [on|off] : wireless setup mode (phone BLE)", .func = cmd_setup },
         { .command = "dsp",      .help = "dsp [ver|apply] : main board firmware status / query / apply staged", .func = cmd_dsp },

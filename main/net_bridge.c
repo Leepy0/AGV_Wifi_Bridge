@@ -47,6 +47,7 @@ static net_stat_t s_st;
 static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota, s_seq_dsp, s_seq_info;
 static esp_timer_handle_t s_reconn_timer;
 static uint32_t s_fail_streak;          // 연속 접속 실패 횟수 (재접속 간격 조절용)
+static bool s_disconnect_logged;        // 연결 복구 전까지 disconnect 경고는 1회만 출력
 static volatile bool s_hold;            // STA 재접속 보류 (설정 AP 사용 중)
 
 bool net_is_up(void)
@@ -180,7 +181,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         xEventGroupClearBits(s_evt, BIT_UP);
         s_st.disconnects++;
         s_st.last_reason = e->reason;
-        ESP_LOGW(TAG, "disconnected reason=%d rssi=%d", e->reason, e->rssi);
+        if (!s_disconnect_logged) {
+            ESP_LOGW(TAG, "disconnected reason=%d rssi=%d (further disconnect logs suppressed until Wi-Fi reconnects)",
+                     e->reason, e->rssi);
+            s_disconnect_logged = true;
+        }
         // 로밍(BTM/FT) 중에는 드라이버가 직접 재접속하므로 개입하지 않음. 설정 AP 사용 중에는 보류
         if (e->reason != WIFI_REASON_ROAMING && !s_hold) {
             // 처음 몇 번은 즉시 재접속(이동 중 AP 이탈 대응), 계속 실패하면(AP 꺼짐·비밀번호 오류) 간격을 둠
@@ -194,6 +199,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&e->ip_info.ip));
         s_fail_streak = 0;
+        s_disconnect_logged = false;   // 연결 복구 후 다음 장애는 다시 1회 기록
         xEventGroupSetBits(s_evt, BIT_UP);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
         ESP_LOGW(TAG, "lost ip");
