@@ -374,7 +374,7 @@ setup: on name=AGVBR-01-A1B2 ble=advertising
 10. `login agvsetup` → `stat` 을 보냅니다. 아래처럼 나오면 성공입니다.
     ```
     fw=0.5.2 part=ota_0 ota=valid cfg=saved
-    wifi: UP ip=192.168.10.107 rssi=-55 ch=6 bssid=…
+    wifi: UP mac=AA:BB:CC:DD:EE:FF ip=192.168.10.107 rssi=-55 ch=6 bssid=…
     ```
 11. `setup off` 로 닫거나 연결을 끊습니다. 끊으면 Wi-Fi 연결 상태에서 5분 뒤 자동으로 닫힙니다.
 
@@ -412,7 +412,7 @@ bridge> reboot
 - `set` 은 `ok - 'save' then 'reboot' to apply`, `save` 는 `saved` 로 답합니다.
 - 인자 없이 `set` 만 치면 키 목록이 나옵니다.
 - 콘솔에서 `reboot` 하면 설정 모드는 다시 열리지 않습니다.
-- 재부팅 뒤 `stat` 의 `wifi: UP ip=…` 로 확인합니다.
+- 재부팅 뒤 `stat` 의 `wifi: UP mac=… ip=…` 로 확인합니다.
 
 콘솔 명령 전체는 [10-2](#10-2-명령-요약)에 있습니다.
 
@@ -515,7 +515,7 @@ idf.py menuconfig
 
 | 확인 | 방법 | 정상 |
 |---|---|---|
-| Wi-Fi | 콘솔 `stat` | `wifi: UP ip=192.168.10.107 rssi=-40~-70` |
+| Wi-Fi | 콘솔 `stat` | `wifi: UP mac=… ip=192.168.10.107 rssi=-40~-70` |
 | 송신 | `stat` 의 `net :` 줄 | `tx=` 증가, `tx_err=0` |
 | 하향 수신 | 게이트웨이 **PING** 후 `stat` | `rx=` 증가, `rx_foreign` 은 늘지 않음 |
 | 메인보드 프레임 | 게이트웨이 호기 현황 `MAIN ↑/↓` | AGV 메인보드가 붙어 있으면 증가 |
