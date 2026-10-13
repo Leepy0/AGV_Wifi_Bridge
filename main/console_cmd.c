@@ -152,8 +152,8 @@ static int cmd_dsp(int argc, char **argv)
 static int cmd_log(int argc, char **argv)
 {
     if (argc != 2) {
-        printf("usage: log <none|error|warn|info|debug|verbose>\\n"
-               "sets the runtime log level for all components (not saved across reboot)\\n");
+        printf("usage: log <none|error|warn|info|debug|verbose>\n"
+               "sets the runtime log level for all components (not saved across reboot)\n");
         return 1;
     }
 
@@ -171,12 +171,12 @@ static int cmd_log(int argc, char **argv)
     } else if (strcmp(argv[1], "verbose") == 0) {
         level = ESP_LOG_VERBOSE;
     } else {
-        printf("invalid level: %s\\n", argv[1]);
+        printf("invalid level: %s\n", argv[1]);
         return 1;
     }
 
     esp_log_level_set("*", level);
-    printf("runtime log level set to %s\\n", argv[1]);
+    printf("runtime log level set to %s\n", argv[1]);
     return 0;
 }
 
