@@ -243,7 +243,9 @@ static esp_err_t wifi_init(void)
     if (g_cfg.static_ip != 0) {
         ESP_RETURN_ON_ERROR(set_static_ip(), TAG, "static ip");
     }
-    apply_dns_config();                // 고정 IP에서는 Wi-Fi 시작 전에 적용
+    if (g_cfg.static_ip != 0) {
+        apply_dns_config();            // 고정 IP에서는 Wi-Fi 시작 전에 적용
+    }
 
     const esp_timer_create_args_t ta = { .callback = reconn_timer_cb, .name = "reconn" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&ta, &s_reconn_timer), TAG, "reconn timer");
