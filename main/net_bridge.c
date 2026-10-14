@@ -171,6 +171,34 @@ static esp_err_t set_static_ip(void)
     return esp_netif_set_ip_info(s_netif, &ip);
 }
 
+// 수동 DNS 가 설정된 경우에만 덮어씀. 0은 DHCP/자동 DNS를 그대로 사용한다.
+static void apply_dns_config(void)
+{
+    const struct {
+        esp_netif_dns_type_t type;
+        uint32_t ip;
+        const char *name;
+    } entries[] = {
+        { ESP_NETIF_DNS_MAIN,   g_cfg.dns_primary,   "primary" },
+        { ESP_NETIF_DNS_BACKUP, g_cfg.dns_secondary, "secondary" },
+    };
+
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        if (entries[i].ip == 0) {
+            continue;
+        }
+        esp_netif_dns_info_t dns = {0};
+        dns.ip.type = IPADDR_TYPE_V4;
+        dns.ip.u_addr.ip4.addr = entries[i].ip;
+        esp_err_t err = esp_netif_set_dns_info(s_netif, entries[i].type, &dns);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "set %s DNS failed: %s", entries[i].name, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "%s DNS set to " IPSTR, entries[i].name, IP2STR(&dns.ip.u_addr.ip4));
+        }
+    }
+}
+
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
@@ -198,6 +226,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&e->ip_info.ip));
+        apply_dns_config();            // DHCP가 DNS를 설정한 뒤 수동 지정값을 우선 적용
         s_fail_streak = 0;
         s_disconnect_logged = false;   // 연결 복구 후 다음 장애는 다시 1회 기록
         xEventGroupSetBits(s_evt, BIT_UP);
@@ -213,6 +242,9 @@ static esp_err_t wifi_init(void)
     ESP_RETURN_ON_FALSE(s_netif, ESP_FAIL, TAG, "sta netif");
     if (g_cfg.static_ip != 0) {
         ESP_RETURN_ON_ERROR(set_static_ip(), TAG, "static ip");
+    }
+    if (g_cfg.static_ip != 0) {
+        apply_dns_config();            // 고정 IP에서는 Wi-Fi 시작 전에 적용
     }
 
     const esp_timer_create_args_t ta = { .callback = reconn_timer_cb, .name = "reconn" };
