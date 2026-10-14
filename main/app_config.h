@@ -5,7 +5,7 @@
 #include "esp_err.h"
 
 // NVS 에 blob 으로 저장되는 런타임 설정 (구조 변경 시 CFG_VERSION 증가)
-#define CFG_VERSION 1
+#define CFG_VERSION 2
 
 typedef struct {
     uint16_t version;
@@ -23,6 +23,8 @@ typedef struct {
     uint32_t main_baud;
     uint32_t rfid_baud;
     uint16_t hb_ms;         // 0 = heartbeat 끔
+    uint32_t dns_primary;   // 0 = DHCP/자동 DNS 유지
+    uint32_t dns_secondary; // 0 = 미설정
 } app_cfg_t;
 
 extern app_cfg_t g_cfg;             // 실행 중 설정 (부팅 후 읽기 전용)
