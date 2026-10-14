@@ -12,7 +12,7 @@ RFID 리더 ──RS232──┐                              ┌── UDP 5000
 - **RFID 리더 → 메인보드**: 기존 통신보드처럼 바이패스합니다. Wi-Fi 연결과 무관하게 동작합니다.
 - **RFID 리더 → 네트워크**: 브로드캐스트(기본값) 또는 지정 IP 로 송신합니다.
 - 메인보드로 가는 데이터(RFID, ACS 하향)는 송신 태스크 하나가 **프레임 단위로** 내보냅니다. 두 데이터가 섞이지 않습니다.
-- **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰 블루투스(BLE)로도 바꿀 수 있습니다.
+- **설정**: USB 콘솔(유선) 외에 서버 원격 명령(UDP)이나 휴대폰 블루투스(BLE)로도 바꿀 수 있습니다.\n- **ACS AGV 식별/연결 상태**: 게이트웨이는 ACS `agv-info` 의 `agvOpCtrl` IP 와 브리지 UDP 패킷의 출발지 IP 를 비교합니다. 따라서 `agvOpCtrl` 은 브리지의 실제 Wi-Fi 주소와 같아야 합니다. DHCP 를 쓰면 DHCP 서버에서 해당 브리지의 IP 를 예약하고, IP 가 바뀌면 ACS 값도 갱신하세요. `INFO` JSON 의 `ip` 필드에도 브리지의 현재 Wi-Fi 주소가 들어갑니다. 바이너리 패킷의 호기 번호와 OTA 제어 규격은 그대로 유지됩니다.
 
 **설치 가이드**: [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md) · **게이트웨이 서버**: [AGV_FOTA_GATEWAY](https://github.com/Leepy0/AGV_FOTA_GATEWAY) — [docs/SYSTEM_FLOW.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/SYSTEM_FLOW.md)(전체 흐름) · [docs/DEPLOY.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/DEPLOY.md)(설치·운영)
 
