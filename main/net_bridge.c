@@ -107,7 +107,9 @@ bool net_send_dsp_result(const uint8_t *data, size_t len)
     return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_DSP_OTA_RESULT, s_seq_dsp++, data, len);
 }
 
-// 장치 정보 (관리 서버 목록용): 설정·버전·메인보드 버전·스테이징 상태
+// 장치 정보 (관리 서버 목록용): 설정·버전·메인보드 버전·스테이징 상태.
+// ip 는 브리지의 실제 Wi-Fi 주소이며, 게이트웨이는 ACS agvOpCtrl 과 이 주소를 비교해 연결 여부를 판정한다.
+// 이 필드는 JSON INFO payload 안에만 추가되며 바이너리 패킷 헤더/기존 OTA 프로토콜은 변경하지 않는다.
 static void send_info(const struct sockaddr_in *to)
 {
     static char js[BR_PAYLOAD_MAX];     // net_rx 태스크 전용
