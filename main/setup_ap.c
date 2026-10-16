@@ -62,6 +62,8 @@ static const struct {
     { NULL,     "ip",          "고정 IP (비우면 DHCP)",             "inputmode=decimal placeholder=DHCP" },
     { NULL,     "mask",        "서브넷 마스크",                     "inputmode=decimal required" },
     { NULL,     "gw",          "게이트웨이",                        "inputmode=decimal required" },
+    { NULL,     "dns",         "기본 DNS (비우면 자동)",             "inputmode=decimal placeholder=자동" },
+    { NULL,     "dns2",        "보조 DNS (선택)",                    "inputmode=decimal placeholder=선택" },
     { "서버",   "server",      "서버 IP",                           "inputmode=decimal required" },
     { NULL,     "server_port", "서버 포트",                         "type=number min=1 max=65535 required" },
     { NULL,     "local_port",  "수신 포트",                         "type=number min=1 max=65535 required" },
@@ -171,6 +173,8 @@ static const char *field_value(const app_cfg_t *c, const char *key, char *buf, s
     else if (strcmp(key, "ip") == 0)     return ip_or(c->static_ip, "", buf, len);
     else if (strcmp(key, "mask") == 0)   return ip_or(c->netmask, "0.0.0.0", buf, len);
     else if (strcmp(key, "gw") == 0)     return ip_or(c->gateway, "0.0.0.0", buf, len);
+    else if (strcmp(key, "dns") == 0)    return ip_or(c->dns_primary, "", buf, len);
+    else if (strcmp(key, "dns2") == 0)   return ip_or(c->dns_secondary, "", buf, len);
     else if (strcmp(key, "server") == 0) return ip_or(c->server_ip, "", buf, len);
     else if (strcmp(key, "server_port") == 0) snprintf(buf, len, "%u", c->server_port);
     else if (strcmp(key, "local_port") == 0)  snprintf(buf, len, "%u", c->local_port);

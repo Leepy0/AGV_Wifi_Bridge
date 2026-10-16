@@ -26,7 +26,8 @@ static int cmd_set(int argc, char **argv)
     if (argc != 3) {
         printf("usage: set <key> <value>\n"
                "keys : agv ssid pass(- = none) ip(dhcp) mask gw server server_port local_port\n"
-               "       rfid_dst(off / 255.255.255.255) rfid_port main_baud rfid_baud hb_ms(0 = off, 100-2000)\n");
+               "       dns(auto or IPv4) dns2(auto or IPv4) rfid_dst(off / 255.255.255.255) rfid_port\n"
+               "       main_baud rfid_baud hb_ms(0 = off, 100-2000)\n");
         return 1;
     }
     if (!cfg_set(argv[1], argv[2])) {

@@ -113,6 +113,8 @@ bridge> set ssid AGV_WIFI
 bridge> set pass mypassword
 bridge> set ip 192.168.10.107      # 현장은 고정 IP 권장 (DHCP 는 재연결마다 수백 ms~1초 추가)
 bridge> set gw 192.168.10.1
+bridge> set dns 192.168.10.1      # 선택: 기본 DNS (auto = DHCP/자동)
+bridge> set dns2 8.8.8.8           # 선택: 보조 DNS
 bridge> set server 192.168.10.10
 bridge> set rfid_baud 9600         # RFID 리더 실제 보드레이트 확인 필요
 bridge> save
@@ -175,6 +177,8 @@ cfg 7 reboot
    set pass mypassword
    set ip 192.168.10.107
    set gw 192.168.10.1
+   set dns 192.168.10.1
+   set dns2 8.8.8.8
    set server 192.168.10.10
    save
    reboot
@@ -307,5 +311,6 @@ dotnet run BridgeTest.cs     # .NET 10, 명령: list | send <agv> <data> | ping 
 
 - AGV 장착 시에는 BOB-11189 대신 절연형(TD301D232H ×2)을 사용합니다. GND 전위차·모터 노이즈 대책입니다.
 - 다중 AP 구간에서는 `menuconfig > Component config > Wi-Fi > Advanced support for Wi-Fi Roaming` 을 검토하세요(RSSI 기반 선제 로밍).
+- DNS: `set dns <IPv4|auto>` 와 `set dns2 <IPv4|auto>` 로 기본/보조 DNS를 설정합니다. `auto`(기본값)는 DHCP DNS를 유지합니다. 고정 IP에서 이름 해석이 필요하면 DNS 주소를 지정하고 `save` 후 `reboot` 하세요. 설정 SoftAP 웹 페이지에도 두 항목이 표시됩니다.
 - Wi-Fi 재접속: 연속 5회까지는 즉시, 그 이후(AP 꺼짐·비밀번호 오류)는 1초 간격으로 시도합니다.
 - 서버 측(ACS 소켓 연동, OTA 순차 배포)은 게이트웨이 [AGV_FOTA_GATEWAY](https://github.com/Leepy0/AGV_FOTA_GATEWAY)가 맡습니다.

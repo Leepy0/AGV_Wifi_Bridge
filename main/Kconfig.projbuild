@@ -27,6 +27,14 @@ menu "AGV Wi-Fi Bridge"
             string "Gateway"
             default "0.0.0.0"
 
+        config BR_DNS_PRIMARY
+            string "Primary DNS (empty = automatic/DHCP)"
+            default ""
+
+        config BR_DNS_SECONDARY
+            string "Secondary DNS (empty = unset)"
+            default ""
+
         config BR_SERVER_IP
             string "Server (Gateway) IP"
             default "192.168.0.10"

@@ -17,6 +17,35 @@ static const char *NVS_NS      = "bridge";
 static const char *NVS_KEY     = "cfg";
 static const char *NVS_KEY_BAK = "cfg_bak";     // 원격 저장 직전의 동작 설정 — 있으면 확인 대기(trial) 중
 
+// CFG_VERSION 1 저장본과의 호환: DNS 필드를 추가하기 전의 구조
+typedef struct {
+    uint16_t version;
+    uint8_t  agv_id;
+    char     ssid[33];
+    char     pass[65];
+    uint32_t static_ip;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t server_ip;
+    uint16_t server_port;
+    uint16_t local_port;
+    uint32_t rfid_dst_ip;
+    uint16_t rfid_dst_port;
+    uint32_t main_baud;
+    uint32_t rfid_baud;
+    uint16_t hb_ms;
+} app_cfg_v1_t;
+
+_Static_assert(offsetof(app_cfg_t, dns_primary) == sizeof(app_cfg_v1_t),
+               "DNS fields must be appended to preserve v1 config layout");
+
+static void migrate_v1(const app_cfg_v1_t *old, app_cfg_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    memcpy(out, old, sizeof(*old));
+    out->version = CFG_VERSION;
+}
+
 #define TRIAL_TIMEOUT_US  (180LL * 1000 * 1000)  // 원격 변경 후 이 시간 안에 서버 통신이 없으면 복구
 
 _Static_assert(CONFIG_BR_HB_MS == 0 || (CONFIG_BR_HB_MS >= BU_HB_MS_MIN && CONFIG_BR_HB_MS <= BU_HB_MS_MAX),
@@ -101,12 +130,14 @@ static void cfg_defaults(app_cfg_t *c)
     c->main_baud     = CONFIG_BR_MAIN_BAUD;
     c->rfid_baud     = CONFIG_BR_RFID_BAUD;
     c->hb_ms         = CONFIG_BR_HB_MS;
+    parse_ip_or_zero(CONFIG_BR_DNS_PRIMARY, "auto", &c->dns_primary);
+    parse_ip_or_zero(CONFIG_BR_DNS_SECONDARY, "auto", &c->dns_secondary);
 }
 
 // 원격 변경 후 서버 통신이 없음 → 백업해 둔 이전 설정으로 되돌리고 재부팅
 static void trial_timeout(void *arg)
 {
-    static app_cfg_t bak;           // esp_timer 태스크 스택 절약
+    static union { app_cfg_t current; app_cfg_v1_t legacy; } bak; // esp_timer 태스크 스택 절약
     size_t len = sizeof(bak);
     nvs_handle_t h;
 
@@ -118,8 +149,14 @@ static void trial_timeout(void *arg)
     ESP_LOGE(TAG, "no server contact within %llds after remote config change - restoring previous config",
              TRIAL_TIMEOUT_US / 1000000);
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        if (nvs_get_blob(h, NVS_KEY_BAK, &bak, &len) == ESP_OK && len == sizeof(bak) && bak.version == CFG_VERSION) {
-            nvs_set_blob(h, NVS_KEY, &bak, sizeof(bak));
+        if (nvs_get_blob(h, NVS_KEY_BAK, &bak, &len) == ESP_OK) {
+            if (len == sizeof(app_cfg_t) && bak.current.version == CFG_VERSION) {
+                nvs_set_blob(h, NVS_KEY, &bak.current, sizeof(bak.current));
+            } else if (len == sizeof(app_cfg_v1_t) && bak.legacy.version == 1) {
+                app_cfg_t migrated;
+                migrate_v1(&bak.legacy, &migrated);
+                nvs_set_blob(h, NVS_KEY, &migrated, sizeof(migrated));
+            }
         }
         nvs_erase_key(h, NVS_KEY_BAK);
         nvs_commit(h);
@@ -140,18 +177,19 @@ static void trial_cancel(void)
 void cfg_load(void)
 {
     nvs_handle_t h;
-    app_cfg_t tmp;
-    size_t len = sizeof(tmp);
+    union { app_cfg_t current; app_cfg_v1_t legacy; } stored = {0};
+    size_t len = sizeof(stored);
+    bool migrated = false;
 
     s_lock = xSemaphoreCreateMutex();
     cfg_defaults(&g_cfg);
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        esp_err_t err = nvs_get_blob(h, NVS_KEY, &tmp, &len);
+        esp_err_t err = nvs_get_blob(h, NVS_KEY, &stored, &len);
         size_t bak_len = 0;
         bool bak = nvs_get_blob(h, NVS_KEY_BAK, NULL, &bak_len) == ESP_OK;
         nvs_close(h);
-        if (err == ESP_OK && len == sizeof(tmp) && tmp.version == CFG_VERSION) {
-            g_cfg = tmp;
+        if (err == ESP_OK && len == sizeof(app_cfg_t) && stored.current.version == CFG_VERSION) {
+            g_cfg = stored.current;
             s_saved = true;
             ESP_LOGI(TAG, "loaded config from NVS");
             if (!bu_hb_ms_valid(g_cfg.hb_ms)) {
@@ -160,8 +198,22 @@ void cfg_load(void)
                          g_cfg.hb_ms, BU_HB_MS_MIN, BU_HB_MS_MAX, CONFIG_BR_HB_MS);
                 g_cfg.hb_ms = CONFIG_BR_HB_MS;
             }
+        } else if (err == ESP_OK && len == sizeof(app_cfg_v1_t) && stored.legacy.version == 1) {
+            migrate_v1(&stored.legacy, &g_cfg);
+            s_saved = true;
+            migrated = true;
+            ESP_LOGI(TAG, "migrated saved config v1 -> v2 (DNS defaults to automatic)");
         } else if (err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "saved config invalid (%s), using defaults", esp_err_to_name(err));
+        }
+        if (migrated) {
+            nvs_handle_t wh;
+            if (nvs_open(NVS_NS, NVS_READWRITE, &wh) == ESP_OK) {
+                esp_err_t we = nvs_set_blob(wh, NVS_KEY, &g_cfg, sizeof(g_cfg));
+                if (we == ESP_OK) we = nvs_commit(wh);
+                if (we != ESP_OK) ESP_LOGW(TAG, "config migration save failed: %s", esp_err_to_name(we));
+                nvs_close(wh);
+            }
         }
         if (bak) {
             // 서버 원격 저장 후 첫 부팅 — 서버 통신이 확인되면 확정, 아니면 이전 설정으로 복구
@@ -293,6 +345,9 @@ size_t cfg_format(char *buf, size_t cap)
     OUT("ip=%s mask=%s gw=%s\n",
         c.static_ip ? ip_str(c.static_ip, a, sizeof(a)) : "dhcp",
         ip_str(c.netmask, b, sizeof(b)), ip_str(c.gateway, d, sizeof(d)));
+    OUT("dns=%s dns2=%s\n",
+        c.dns_primary ? ip_str(c.dns_primary, a, sizeof(a)) : "auto",
+        c.dns_secondary ? ip_str(c.dns_secondary, b, sizeof(b)) : "auto");
     OUT("server=%s:%u local_port=%u\n", ip_str(c.server_ip, a, sizeof(a)), c.server_port, c.local_port);
     OUT("rfid_dst=%s:%u\n", c.rfid_dst_ip ? ip_str(c.rfid_dst_ip, a, sizeof(a)) : "off", c.rfid_dst_port);
     OUT("main_baud=%lu rfid_baud=%lu hb_ms=%u\n",
@@ -338,6 +393,12 @@ static bool apply(app_cfg_t *c, const char *key, const char *val)
     } else if (strcmp(key, "gw") == 0) {
         if (!parse_ip(val, &ip)) return false;
         c->gateway = ip;
+    } else if (strcmp(key, "dns") == 0) {
+        if (!parse_ip_or_zero(val, "auto", &ip)) return false;
+        c->dns_primary = ip;
+    } else if (strcmp(key, "dns2") == 0) {
+        if (!parse_ip_or_zero(val, "auto", &ip)) return false;
+        c->dns_secondary = ip;
     } else if (strcmp(key, "server") == 0) {
         if (!parse_ip(val, &ip) || ip == 0) return false;
         c->server_ip = ip;
