@@ -12,6 +12,7 @@
 #include "dsp_ota.h"
 #include "esp_app_desc.h"
 #include "cmd.h"
+#include "timesync.h"
 #include "console_cmd.h"
 
 static const char *TAG = "console";
@@ -25,6 +26,14 @@ static int cmd_cfg(int argc, char **argv)
         return 0;
     }
     cfg_print();
+    return 0;
+}
+
+static int con_time(int argc, char **argv)
+{
+    char t[160];
+    timesync_format(t, sizeof(t));
+    fputs(t, stdout);
     return 0;
 }
 
@@ -255,6 +264,7 @@ void console_start(void)
         { .command = "defaults", .help = "erase saved config (build defaults on reboot)", .func = cmd_defaults },
         { .command = "reboot",   .help = "restart",                             .func = cmd_reboot },
         { .command = "stat",     .help = "wifi / network / uart counters [json]", .func = cmd_stat },
+        { .command = "time",     .help = "server time sync status (UTC)", .func = con_time },
         { .command = "scan",     .help = "list visible 2.4GHz APs as JSON (2-3 s; use while the AGV is stopped)", .func = con_scan },
         { .command = "nettest",  .help = "nettest [host] : ping the server (or host) 3 times, resolve host name", .func = con_nettest },
         { .command = "mon",     .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },

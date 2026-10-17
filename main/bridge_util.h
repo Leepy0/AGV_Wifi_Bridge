@@ -90,6 +90,71 @@ static inline bool bu_url_host_is(const char *url, uint32_t server_ip_be)
     return bu_parse_ipv4(p, hl, &ip) && ip == server_ip_be;
 }
 
+// ───── 서버 시각 동기 (TIME 패킷 payload 해석) ─────
+#define BU_UNIX_MS_MIN  1700000000000LL     // 2023-11 — 이보다 이른 값은 서버 시계가 틀린 것으로 보고 쓰지 않음
+#define BU_TIME_RTT_MAX 10000               // 왕복 지연이 이보다 길면 오래된 응답으로 보고 버림 (ms)
+
+// JSON 한 줄에서 "key":정수 를 찾는다. payload 는 NUL 로 끝나지 않으므로 길이를 받는다. 못 찾거나 정수가 아니면 false
+static inline bool bu_json_i64(const char *js, size_t len, const char *key, int64_t *out)
+{
+    char pat[16];
+    size_t kl = strlen(key);
+    if (kl + 4 > sizeof(pat)) return false;
+    pat[0] = '"';
+    memcpy(pat + 1, key, kl);
+    pat[kl + 1] = '"';
+    pat[kl + 2] = ':';
+    size_t pl = kl + 3;
+    for (size_t i = 0; i + pl <= len; i++) {
+        if (memcmp(js + i, pat, pl) != 0) continue;
+        size_t j = i + pl;
+        while (j < len && js[j] == ' ') j++;
+        bool neg = false;
+        if (j < len && js[j] == '-') { neg = true; j++; }
+        if (j >= len || js[j] < '0' || js[j] > '9') return false;
+        int64_t v = 0;
+        int digits = 0;
+        for (; j < len && js[j] >= '0' && js[j] <= '9'; j++) {
+            if (++digits > 18) return false;
+            v = v * 10 + (js[j] - '0');
+        }
+        *out = neg ? -v : v;
+        return true;
+    }
+    return false;
+}
+
+typedef struct {
+    int64_t unix_ms;    // 맞출 시각 (UTC unix ms)
+    int32_t rtt_ms;     // 왕복 지연 (서버가 먼저 보낸 경우 -1)
+    bool    pushed;     // 서버가 먼저 보낸 {"t2"} 형태
+} bu_time_t;
+
+// 서버 TIME 패킷 → 맞출 시각. up_ms = 이 패킷을 받은 순간의 브리지 가동 ms, pending_t0 = 보낸 요청의 t0 (없으면 -1).
+//  - 요청 응답 {"t0","t1","t2"}: t0 가 보낸 요청과 같아야 한다. rtt = (up_ms − t0) − (t2 − t1), 시각 = t2 + rtt/2 (NTP 한 번 교환).
+//    ms 로 내림한 오차(−5..−1)는 0 으로 보고, 0..BU_TIME_RTT_MAX 밖이면 버린다
+//  - 서버가 먼저 보낸 {"t2"}: 시각 = t2 (한 방향 지연만큼 늦음)
+// t2 가 BU_UNIX_MS_MIN 보다 이르면(서버 시계가 1970 근처) 버린다
+static inline bool bu_time_solve(const char *js, size_t len, int64_t up_ms, int64_t pending_t0, bu_time_t *out)
+{
+    int64_t t0, t1, t2;
+    if (!bu_json_i64(js, len, "t2", &t2) || t2 < BU_UNIX_MS_MIN) return false;
+    if (!bu_json_i64(js, len, "t0", &t0)) {
+        out->unix_ms = t2;
+        out->rtt_ms = -1;
+        out->pushed = true;
+        return true;
+    }
+    if (pending_t0 < 0 || t0 != pending_t0 || !bu_json_i64(js, len, "t1", &t1)) return false;
+    int64_t rtt = (up_ms - t0) - (t2 - t1);
+    if (rtt < 0 && rtt >= -5) rtt = 0;
+    if (rtt < 0 || rtt > BU_TIME_RTT_MAX) return false;
+    out->unix_ms = t2 + rtt / 2;
+    out->rtt_ms = (int32_t)rtt;
+    out->pushed = false;
+    return true;
+}
+
 // 같은 연결(session)에서의 로그인 연속 실패 계수
 typedef struct {
     uint32_t session;

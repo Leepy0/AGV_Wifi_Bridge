@@ -20,6 +20,8 @@ typedef enum {
     BR_T_INFO      = 0x12, // ESP → 서버, JSON: agv, mac, ip, fw, part, ota, cfg, dsp, dspb, staged ...
     BR_T_PING      = 0x20, // 서버 → ESP, 왕복 지연 측정
     BR_T_PONG      = 0x21, // ESP → 서버, PING 의 seq/payload 그대로 반송
+    BR_T_TIME_REQ  = 0x22, // ESP → 서버, JSON {"t0": 브리지 가동 ms} — 서버 시각 요청 (0.8.0+)
+    BR_T_TIME      = 0x23, // 서버 → ESP, JSON {"t0","t1","t2"} 요청 응답 또는 {"t2"} 서버가 먼저 — 서버 UTC unix ms
     BR_T_OTA_START = 0x30, // 서버 → ESP, payload = 펌웨어 URL (ASCII, http://서버/파일.bin)
     BR_T_OTA_RESULT= 0x31, // ESP → 서버, JSON: stage(start/progress/done/fail/busy), pct, err
     BR_T_DSP_OTA_START = 0x32, // 서버 → ESP, JSON: url, ver, crc32, size, job, apply — 메인보드 이미지 스테이징

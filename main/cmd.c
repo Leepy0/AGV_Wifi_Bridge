@@ -8,6 +8,7 @@
 #include "ota.h"
 #include "setup.h"
 #include "dsp_ota.h"
+#include "timesync.h"
 #include "cmd.h"
 
 static size_t clamp(int n, size_t cap)
@@ -131,7 +132,11 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         n += net_format_status(out + n, cap - n);
         n += setup_format(out + n, cap - n);
         n += dsp_ota_format(out + n, cap - n);
+        n += timesync_format(out + n, cap - n);
         return n;
+    }
+    if (strcmp(cmd, "time") == 0) {
+        return timesync_format(out, cap);
     }
     if (strcmp(cmd, "scan") == 0) {
         return cmd_scan(out, cap);
@@ -160,7 +165,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         return dsp_ota_format(out, cap);
     }
     if (strcmp(cmd, "help") == 0) {
-        return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | scan | nettest [host] | setup [on|off] | dsp [ver|apply]%s\n",
+        return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | time | scan | nettest [host] | setup [on|off] | dsp [ver|apply]%s\n",
                               src == CMD_SRC_LOCAL ? " | defaults" : ""), cap);
     }
     return clamp(snprintf(out, cap, "unknown command '%s' - type help\n", cmd), cap);

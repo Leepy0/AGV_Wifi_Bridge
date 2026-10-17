@@ -19,6 +19,7 @@
 #include "ping/ping_sock.h"
 #include "app_config.h"
 #include "dsp_app_proto.h"
+#include "timesync.h"
 #include "proto.h"
 #include "uart_bridge.h"
 #include "net_bridge.h"
@@ -48,7 +49,7 @@ static esp_netif_t *s_netif;
 static int s_sock = -1;
 static net_stat_t s_st;
 // 타입별 순번 — 각 타입은 한 태스크에서만 송신하므로 잠금 불필요 (CFG_RESULT 는 요청 seq 반송)
-static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota, s_seq_dsp, s_seq_info;
+static uint16_t s_seq_main, s_seq_rfid, s_seq_status, s_seq_ota, s_seq_dsp, s_seq_info, s_seq_time;
 static esp_timer_handle_t s_reconn_timer;
 static uint32_t s_fail_streak;          // 연속 접속 실패 횟수 (재접속 간격 조절용)
 static bool s_disconnect_logged;        // 연결 복구 전까지 disconnect 경고는 1회만 출력
@@ -104,6 +105,11 @@ bool net_send_rfid(const uint8_t *data, size_t len)
 bool net_send_ota_result(const uint8_t *data, size_t len)
 {
     return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_OTA_RESULT, s_seq_ota++, data, len);
+}
+
+bool net_send_time_req(const uint8_t *data, size_t len)
+{
+    return send_pkt(g_cfg.server_ip, g_cfg.server_port, BR_T_TIME_REQ, s_seq_time++, data, len);
 }
 
 bool net_send_dsp_result(const uint8_t *data, size_t len)
@@ -235,6 +241,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         apply_dns_config();            // DHCP가 DNS를 설정한 뒤 수동 지정값을 우선 적용
         s_fail_streak = 0;
         s_disconnect_logged = false;   // 연결 복구 후 다음 장애는 다시 1회 기록
+        timesync_on_wifi_up();         // 서버에 시각을 묻는다 (재연결 때도 — 그동안 시계가 흘렀을 수 있다)
         xEventGroupSetBits(s_evt, BIT_UP);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
         ESP_LOGW(TAG, "lost ip");
@@ -401,6 +408,13 @@ static void net_rx_task(void *arg)
             }
             handle_cfg_cmd(&src, h.seq, pl, h.len);
             break;
+        case BR_T_TIME:
+            if (h.agv_id != g_cfg.agv_id) {
+                s_st.rx_foreign++;
+                break;
+            }
+            timesync_on_packet(pl, h.len);
+            break;
         case BR_T_INFO_REQ:
             send_info(&src);
             break;
@@ -428,7 +442,7 @@ static void net_rx_task(void *arg)
 // 주기 상태 보고 (서버에서 RSSI/로밍/오류 추이 기록용)
 static void hb_task(void *arg)
 {
-    char js[640];
+    char js[768];
     const char *fw   = esp_app_get_description()->version;
     const char *part = ota_running_partition();
     uint8_t mac[6] = {0};
@@ -439,6 +453,7 @@ static void hb_task(void *arg)
         if (!net_is_up()) {
             continue;
         }
+        timesync_tick();        // 서버에 시각을 물을 때가 되면 TIME_REQ
         wifi_ap_record_t ap = {0};
         esp_wifi_sta_get_ap_info(&ap);
         const uart_stat_t *m = uart_bridge_stat(PORT_MAIN);
@@ -456,6 +471,7 @@ static void hb_task(void *arg)
                          u_err, (unsigned long)s_st.tx_offline, (unsigned long)s_st.tx_err,
                          (unsigned long)esp_get_free_heap_size(), cfg_state_str(), setup_active());
         if (n > 0 && (size_t)n < sizeof(js)) {
+            n += timesync_hb_fields(js + n, sizeof(js) - n);       // tsync(-1 = 미동기)·ts(맞춘 뒤)
             n += dsp_ota_status_json(js + n, sizeof(js) - n);
             n += snprintf(js + n, sizeof(js) - n, "}");
         }
@@ -545,6 +561,10 @@ size_t net_format_status_json(char *buf, size_t cap)
        (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
        setup_active() ? "true" : "false", setup_name());
     d = ok ? dsp_ota_format_json(buf + n, cap - n) : 0;
+    ok = ok && d > 0;
+    n += d;
+    JS(",\"time\":");
+    d = ok ? timesync_json(buf + n, cap - n) : 0;
     ok = ok && d > 0;
     n += d;
     JS(",\"uart\":{\"main\":{\"rx_frm\":%lu,\"tx_frm\":%lu,\"err\":%lu,\"tx_drop\":%lu},"

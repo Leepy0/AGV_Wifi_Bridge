@@ -20,6 +20,7 @@ void      net_sta_hold(bool hold);   // true = STA 재접속 보류 (설정 AP �
 bool net_send_main(const uint8_t *data, size_t len);   // 메인보드 프레임 → 서버
 bool net_send_rfid(const uint8_t *data, size_t len);   // RFID 프레임 → rfid_dst (브로드캐스트/서버)
 bool net_send_ota_result(const uint8_t *data, size_t len);   // OTA 진행/결과 JSON → 서버
+bool net_send_time_req(const uint8_t *data, size_t len);     // 서버에 시각 요청 (timesync.c)
 bool net_send_dsp_result(const uint8_t *data, size_t len);   // 메인보드 OTA 진행/결과 JSON → 서버
 
 void   net_print_status(void);
