@@ -28,6 +28,22 @@ static int cmd_cfg(int argc, char **argv)
     return 0;
 }
 
+static int con_scan(int argc, char **argv)
+{
+    static char js[1024];               // 콘솔 태스크 스택 절약
+    cmd_scan(js, sizeof(js));
+    puts(js);
+    return 0;
+}
+
+static int con_nettest(int argc, char **argv)
+{
+    static char txt[400];
+    cmd_nettest(argc > 1 ? argv[1] : NULL, txt, sizeof(txt));
+    fputs(txt, stdout);
+    return 0;
+}
+
 static int cmd_discard(int argc, char **argv)
 {
     cfg_discard();
@@ -239,7 +255,9 @@ void console_start(void)
         { .command = "defaults", .help = "erase saved config (build defaults on reboot)", .func = cmd_defaults },
         { .command = "reboot",   .help = "restart",                             .func = cmd_reboot },
         { .command = "stat",     .help = "wifi / network / uart counters [json]", .func = cmd_stat },
-        { .command = "mon",      .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
+        { .command = "scan",     .help = "list visible 2.4GHz APs as JSON (2-3 s; use while the AGV is stopped)", .func = con_scan },
+        { .command = "nettest",  .help = "nettest [host] : ping the server (or host) 3 times, resolve host name", .func = con_nettest },
+        { .command = "mon",     .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
         { .command = "log",      .help = "log <none|error|warn|info|debug|verbose> : runtime log level", .func = cmd_log },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
         { .command = "setup",    .help = "setup [on|off] : wireless setup mode (phone BLE)", .func = cmd_setup },

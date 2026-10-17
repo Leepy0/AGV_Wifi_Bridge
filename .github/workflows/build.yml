@@ -137,6 +137,36 @@ jobs:
             echo '```'; ls -l "agv_wifi_bridge_${{ steps.ver.outputs.ver }}"; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 앱(AGV CFG Manager)이 api.github.com 없이 최신 버전·체크섬을 알 수 있게 하는 매니페스트.
+      # 주소: https://github.com/<repo>/releases/latest/download/bridge.json
+      - name: Manifest (bridge.json)
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, datetime
+          ver, repo = os.environ["VER"], os.environ["REPO"]
+          d = f"dist/agv_wifi_bridge_{ver}"
+          def ent(path, offset=None):
+              b = open(path, "rb").read()
+              e = {"file": os.path.basename(path), "sha256": hashlib.sha256(b).hexdigest(), "size": len(b)}
+              if offset: e["offset"] = offset
+              return e
+          m = {
+              "version": ver,
+              "published": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "page": f"https://github.com/{repo}/releases/tag/v{ver}",
+              "zip": ent(f"dist/agv_wifi_bridge_{ver}.zip"),
+              "app": ent(f"{d}/agv_wifi_bridge.bin", "0x20000"),
+              "merged": ent(f"{d}/agv_wifi_bridge_merged.bin", "0x0"),
+              "minPartitionVersion": "0.5.0",
+              "notes": subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip(),
+          }
+          json.dump(m, open("dist/bridge.json", "w"), ensure_ascii=False, indent=2)
+          PY
+          cat dist/bridge.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: agv_wifi_bridge_${{ steps.ver.outputs.ver }}
@@ -153,4 +183,5 @@ jobs:
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge_merged.bin
+            dist/bridge.json
           generate_release_notes: true
