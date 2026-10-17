@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -14,7 +15,10 @@
 #include "esp_app_desc.h"
 #include "esp_idf_version.h"
 #include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "ping/ping_sock.h"
 #include "app_config.h"
+#include "dsp_app_proto.h"
 #include "proto.h"
 #include "uart_bridge.h"
 #include "net_bridge.h"
@@ -554,6 +558,185 @@ size_t net_format_status_json(char *buf, size_t cap)
         n = cap > 0 ? (size_t)snprintf(buf, cap, "{\"err\":\"overflow\"}") : 0;
         return n < cap ? n : (cap ? cap - 1 : 0);
     }
+    return n;
+}
+
+// ───── 진단 명령 (scan / nettest) — 한 번에 하나만, 호출 태스크를 잠시 막는다 ─────
+static bool s_diag_busy;
+
+static bool diag_enter(void)
+{
+    return !__atomic_exchange_n(&s_diag_busy, true, __ATOMIC_ACQ_REL);
+}
+
+static void diag_leave(void)
+{
+    __atomic_store_n(&s_diag_busy, false, __ATOMIC_RELEASE);
+}
+
+static size_t put(char *buf, size_t cap, int n)
+{
+    return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : (cap ? cap - 1 : 0));
+}
+
+static const char *auth_str(wifi_auth_mode_t a)
+{
+    switch (a) {
+    case WIFI_AUTH_OPEN:            return "open";
+    case WIFI_AUTH_WEP:             return "wep";
+    case WIFI_AUTH_WPA_PSK:         return "wpa";
+    case WIFI_AUTH_WPA2_PSK:
+    case WIFI_AUTH_WPA_WPA2_PSK:    return "wpa2";
+    case WIFI_AUTH_WPA3_PSK:        return "wpa3";
+    case WIFI_AUTH_WPA2_WPA3_PSK:   return "wpa2_wpa3";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "ent";
+    default:                        return "other";
+    }
+}
+
+#define SCAN_MAX_REC  20            // 드라이버가 돌려줄 최대 개수
+#define SCAN_MAX_OUT  15            // 응답에 싣는 최대 개수 (RSSI 내림차순)
+static wifi_ap_record_t s_scan_rec[SCAN_MAX_REC];   // s_diag_busy 로 보호
+
+// scan — 2.4GHz 전 채널 스캔(2~3초, 블로킹) 뒤 [{"ssid","rssi","ch","auth"},..] 한 줄 JSON.
+// 응답이 payload 한도를 넘으면 뒤(약한 AP)부터 줄인다. STA 연결 중 스캔은 중계 지연을 잠깐 늘리므로 정지 상태에서만 쓴다
+size_t net_scan_json(char *buf, size_t cap)
+{
+    size_t pos = 0;
+
+    if (cap < 4) {
+        return 0;
+    }
+    if (!diag_enter()) {
+        return put(buf, cap, snprintf(buf, cap, "{\"err\":\"busy\"}"));
+    }
+    esp_err_t err = esp_wifi_scan_start(NULL, true);
+    uint16_t n = SCAN_MAX_REC;
+    if (err == ESP_OK) {
+        err = esp_wifi_scan_get_ap_records(&n, s_scan_rec);     // 결과 목록 해제 겸용. ESP-IDF 가 RSSI 내림차순으로 정렬해 줌
+    }
+    if (err != ESP_OK) {
+        diag_leave();
+        return put(buf, cap, snprintf(buf, cap, "{\"err\":\"scan failed: %s\"}", esp_err_to_name(err)));
+    }
+    buf[pos++] = '[';
+    int emitted = 0;
+    for (uint16_t i = 0; i < n && emitted < SCAN_MAX_OUT; i++) {
+        char ssid[200];
+        if (s_scan_rec[i].ssid[0] == '\0') {
+            continue;               // 숨김 AP
+        }
+        dap_json_escape(ssid, sizeof(ssid), (const char *)s_scan_rec[i].ssid);
+        int k = snprintf(buf + pos, cap - pos, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"ch\":%u,\"auth\":\"%s\"}",
+                         emitted ? "," : "", ssid, s_scan_rec[i].rssi, s_scan_rec[i].primary, auth_str(s_scan_rec[i].authmode));
+        if (k < 0 || pos + (size_t)k + 2 > cap) {
+            break;                  // 다음 항목 + ']' 가 안 들어가면 여기까지
+        }
+        pos += (size_t)k;
+        emitted++;
+    }
+    buf[pos++] = ']';
+    buf[pos] = '\0';
+    diag_leave();
+    return pos;
+}
+
+typedef struct {
+    SemaphoreHandle_t done;
+    uint32_t ok, ms;
+} ping_ctx_t;
+static ping_ctx_t s_ping;           // s_diag_busy 로 보호
+
+static void ping_ok(esp_ping_handle_t h, void *arg)
+{
+    uint32_t t = 0;
+    esp_ping_get_profile(h, ESP_PING_PROF_TIMEGAP, &t, sizeof(t));
+    s_ping.ok++;
+    s_ping.ms += t;
+}
+
+static void ping_timeout(esp_ping_handle_t h, void *arg) {}
+
+static void ping_end(esp_ping_handle_t h, void *arg)
+{
+    xSemaphoreGive(s_ping.done);
+}
+
+#define PING_COUNT 3
+
+// nettest [host] — 서버(또는 host)로 ICMP ping 3회. host 가 이름이면 DNS 조회 결과도.
+// ping 이 막힌 망도 있으므로 0/3 이 곧 서버 불통은 아님
+size_t net_test(const char *host, char *buf, size_t cap)
+{
+    char a[16];
+    size_t n = 0;
+    uint32_t ip = g_cfg.server_ip;
+
+    if (!net_is_up()) {
+        return put(buf, cap, snprintf(buf, cap, "wifi: DOWN - nettest needs a Wi-Fi connection\n"));
+    }
+    if (!diag_enter()) {
+        return put(buf, cap, snprintf(buf, cap, "busy: another scan/nettest is running\n"));
+    }
+    if (host != NULL && *host != '\0') {
+        struct in_addr ia;
+        if (inet_aton(host, &ia)) {
+            ip = ia.s_addr;
+        } else {
+            struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM }, *res = NULL;
+            ip = 0;
+            if (getaddrinfo(host, NULL, &hints, &res) == 0 && res != NULL) {
+                ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+                freeaddrinfo(res);
+            }
+            struct in_addr found = { .s_addr = ip };
+            n += put(buf + n, cap - n, ip ? snprintf(buf + n, cap - n, "dns: %s -> %s\n", host, inet_ntoa_r(found, a, sizeof(a)))
+                                          : snprintf(buf + n, cap - n, "dns: fail\n"));
+            if (ip == 0) {
+                diag_leave();
+                return n;
+            }
+        }
+    }
+    struct in_addr tgt = { .s_addr = ip };
+    inet_ntoa_r(tgt, a, sizeof(a));
+
+    if (s_ping.done == NULL) {
+        s_ping.done = xSemaphoreCreateBinary();
+    }
+    s_ping.ok = s_ping.ms = 0;
+    xSemaphoreTake(s_ping.done, 0);         // 이전 세션이 남긴 신호 제거
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.count = PING_COUNT;
+    cfg.interval_ms = 500;
+    cfg.timeout_ms = 1000;
+    ip_addr_set_ip4_u32(&cfg.target_addr, ip);
+    esp_ping_callbacks_t cbs = { .on_ping_success = ping_ok, .on_ping_timeout = ping_timeout, .on_ping_end = ping_end };
+    esp_ping_handle_t h = NULL;
+    esp_err_t err = esp_ping_new_session(&cfg, &cbs, &h);
+    if (err == ESP_OK) {
+        err = esp_ping_start(h);
+    }
+    if (err != ESP_OK) {
+        if (h) {
+            esp_ping_delete_session(h);
+        }
+        diag_leave();
+        return n + put(buf + n, cap - n, snprintf(buf + n, cap - n, "ping failed: %s\n", esp_err_to_name(err)));
+    }
+    // 3회 × (간격 0.5 + 시한 1) 에 여유. 끝나기 전에 시한이 지나면 세션을 멈춘다
+    xSemaphoreTake(s_ping.done, pdMS_TO_TICKS(PING_COUNT * 1500 + 1500));
+    esp_ping_stop(h);
+    esp_ping_delete_session(h);
+    if (s_ping.ok) {
+        n += put(buf + n, cap - n, snprintf(buf + n, cap - n, "ping %s: %lu/%d ok, avg %lu ms\n", a,
+                                            (unsigned long)s_ping.ok, PING_COUNT, (unsigned long)(s_ping.ms / s_ping.ok)));
+    } else {
+        n += put(buf + n, cap - n, snprintf(buf + n, cap - n, "ping %s: 0/%d ok\n"
+                                            "note: no reply does not prove the server is down (ICMP may be filtered)\n", a, PING_COUNT));
+    }
+    diag_leave();
     return n;
 }
 

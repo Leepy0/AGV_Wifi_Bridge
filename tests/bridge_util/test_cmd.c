@@ -15,7 +15,17 @@ static bool s_dsp_prog;
 static int s_saves;
 static bool s_last_trial;
 
+static bool s_dsp_stage;
+static char s_test_host[40];
+static int s_scans, s_tests;
 bool dsp_ota_busy(void) { return s_dsp_prog; }
+bool dsp_ota_staging(void) { return s_dsp_stage; }
+size_t net_scan_json(char *buf, size_t cap) { s_scans++; return (size_t)snprintf(buf, cap, "[{\"ssid\":\"AGV_WIFI\",\"rssi\":-48,\"ch\":6,\"auth\":\"wpa2\"}]"); }
+size_t net_test(const char *host, char *buf, size_t cap) {
+    s_tests++;
+    snprintf(s_test_host, sizeof(s_test_host), "%s", host ? host : "(server)");
+    return (size_t)snprintf(buf, cap, "ping x: 3/3 ok, avg 4 ms\n");
+}
 size_t dsp_ota_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
 void dsp_ota_query_version(void) {}
 void dsp_ota_apply(const char *json, size_t len) {}
@@ -129,6 +139,26 @@ int main(void)
     CHECK(s_discards == 2);
     run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
     CHECK(strstr(out, "discard") != NULL && strstr(out, "cfg [json]") != NULL);
+
+    // BR-4/5: scan · nettest — 평소엔 그대로 전달, 메인보드 굽기·스테이징 중에는 거부
+    run("scan", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_scans == 1 && json_balanced(out) && out[0] == '[' && strstr(out, "\"auth\":\"wpa2\"") != NULL);
+    run("nettest", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_tests == 1 && strcmp(s_test_host, "(server)") == 0 && strstr(out, "3/3 ok") != NULL);
+    run("nettest gateway.local", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_tests == 2 && strcmp(s_test_host, "gateway.local") == 0);
+    s_dsp_stage = true;
+    run("scan", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_scans == 1 && strstr(out, "busy:") != NULL);
+    run("nettest", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_tests == 2 && strstr(out, "busy:") != NULL);
+    s_dsp_stage = false;
+    s_dsp_prog = true;
+    run("scan", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_scans == 1 && strstr(out, "busy:") != NULL);
+    s_dsp_prog = false;
+    run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(strstr(out, "scan") != NULL && strstr(out, "nettest [host]") != NULL);
 
     // 빈 줄은 cfg 텍스트 (strtok 결과 NULL 경로)
     run("", CMD_SRC_LOCAL, out, sizeof(out), &act);

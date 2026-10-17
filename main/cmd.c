@@ -37,6 +37,30 @@ size_t cmd_cfg_json(char *out, size_t cap)
     return (size_t)n + k;
 }
 
+// scan · nettest 는 메인보드 굽기·스테이징 중에는 거부 — Wi-Fi 를 건드리거나 태스크를 오래 막으면 굽기가 끊길 수 있다
+static bool diag_busy(char *out, size_t cap, const char *name, size_t *n)
+{
+    if (!dsp_ota_busy() && !dsp_ota_staging()) {
+        return false;
+    }
+    *n = clamp(snprintf(out, cap, "busy: mainboard programming/staging - %s refused, retry when done\n", name), cap);
+    return true;
+}
+
+// 'scan' — 보이는 AP 목록 JSON (2~3초 블로킹). AGV 정지 상태에서만 쓸 것: STA 연결 중 스캔은 중계 지연을 잠깐 늘린다
+size_t cmd_scan(char *out, size_t cap)
+{
+    size_t n;
+    return diag_busy(out, cap, "scan", &n) ? n : net_scan_json(out, cap);
+}
+
+// 'nettest [host]' — 서버(또는 host) ping 3회 · DNS 조회
+size_t cmd_nettest(const char *host, char *out, size_t cap)
+{
+    size_t n;
+    return diag_busy(out, cap, "nettest", &n) ? n : net_test(host, out, cap);
+}
+
 size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act)
 {
     size_t n;
@@ -109,6 +133,12 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         n += dsp_ota_format(out + n, cap - n);
         return n;
     }
+    if (strcmp(cmd, "scan") == 0) {
+        return cmd_scan(out, cap);
+    }
+    if (strcmp(cmd, "nettest") == 0) {
+        return cmd_nettest(strtok_r(NULL, " ", &rest), out, cap);
+    }
     if (strcmp(cmd, "setup") == 0) {
         char *arg = strtok_r(NULL, " ", &rest);
         if (arg) {
@@ -130,7 +160,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         return dsp_ota_format(out, cap);
     }
     if (strcmp(cmd, "help") == 0) {
-        return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | setup [on|off] | dsp [ver|apply]%s\n",
+        return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | scan | nettest [host] | setup [on|off] | dsp [ver|apply]%s\n",
                               src == CMD_SRC_LOCAL ? " | defaults" : ""), cap);
     }
     return clamp(snprintf(out, cap, "unknown command '%s' - type help\n", cmd), cap);

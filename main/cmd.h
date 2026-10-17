@@ -2,7 +2,7 @@
 #include <stddef.h>
 
 // 텍스트 설정 명령 — 서버 원격(UDP) / 휴대폰 BLE 공용. 키와 문법은 USB 콘솔과 같음
-//   cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | setup [on|off] | help  (+ 현장: defaults)
+//   cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | scan | nettest [host] | setup [on|off] | help  (+ 현장: defaults)
 typedef enum {
     CMD_SRC_SERVER,     // 서버 원격: save = 확인 대기(재부팅 후 서버 통신 없으면 복구), defaults 불가
     CMD_SRC_LOCAL,      // 현장 무선(BLE): save = 즉시 확정, defaults 가능
@@ -21,3 +21,6 @@ typedef enum {
 size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act);
 // 'cfg json' 본문 (콘솔 cfg json 과 공용)
 size_t cmd_cfg_json(char *out, size_t cap);
+// 'scan' · 'nettest [host]' (콘솔과 공용). 메인보드 굽기·스테이징 중에는 busy 로 거부. 수 초 블로킹
+size_t cmd_scan(char *out, size_t cap);
+size_t cmd_nettest(const char *host, char *out, size_t cap);
