@@ -1,6 +1,8 @@
 #include <string.h>
 #include <stdio.h>
 #include "esp_app_desc.h"
+#include "esp_mac.h"
+#include "esp_system.h"
 #include "app_config.h"
 #include "net_bridge.h"
 #include "ota.h"
@@ -16,6 +18,25 @@ static size_t clamp(int n, size_t cap)
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
+// 'cfg json' — 장치 식별(fw·mac·name·part·ota) 뒤에 cfg_format_json 본문을 붙여 한 줄 JSON 으로
+size_t cmd_cfg_json(char *out, size_t cap)
+{
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    int n = snprintf(out, cap, "{\"fw\":\"%s\",\"idf\":\"%s\",\"mac\":\"" MACSTR "\",\"name\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",",
+                     esp_app_get_description()->version, esp_get_idf_version(), MAC2STR(mac), setup_name(),
+                     ota_running_partition(), ota_state_str());
+    if (n < 0 || (size_t)n >= cap) {
+        return clamp(snprintf(out, cap, "{\"err\":\"overflow\"}"), cap);
+    }
+    size_t k = cfg_format_json(out + n, cap - n);
+    if ((size_t)n + k >= cap) {
+        // 잘린 JSON 은 앱이 파싱할 수 없으므로 오류 객체로 대신함
+        return clamp(snprintf(out, cap, "{\"err\":\"overflow\"}"), cap);
+    }
+    return (size_t)n + k;
+}
+
 size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act)
 {
     size_t n;
@@ -29,6 +50,10 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
     char *rest = NULL;
     char *cmd  = strtok_r(line, " ", &rest);
     if (cmd == NULL || strcmp(cmd, "cfg") == 0) {
+        char *arg = cmd ? strtok_r(NULL, " ", &rest) : NULL;
+        if (arg && strcmp(arg, "json") == 0) {
+            return cmd_cfg_json(out, cap);
+        }
         return cfg_format(out, cap);
     }
     if (strcmp(cmd, "set") == 0) {
@@ -54,6 +79,10 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
                                 "or it restores the previous config (gateway 0.3.0+ pings automatically)\n"
                               : "saved - 'reboot' to apply\n"), cap);
     }
+    if (strcmp(cmd, "discard") == 0) {
+        cfg_discard();
+        return clamp(snprintf(out, cap, "discarded - edit copy now equals running config\n"), cap);
+    }
     if (strcmp(cmd, "defaults") == 0 && src == CMD_SRC_LOCAL) {
         esp_err_t err = cfg_erase();
         return clamp(err == ESP_OK
@@ -69,6 +98,10 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         return clamp(snprintf(out, cap, "rebooting\n"), cap);
     }
     if (strcmp(cmd, "stat") == 0) {
+        char *arg = strtok_r(NULL, " ", &rest);
+        if (arg && strcmp(arg, "json") == 0) {
+            return net_format_status_json(out, cap);
+        }
         n = clamp(snprintf(out, cap, "fw=%s part=%s ota=%s cfg=%s\n", esp_app_get_description()->version,
                            ota_running_partition(), ota_state_str(), cfg_state_str()), cap);
         n += net_format_status(out + n, cap - n);
@@ -97,7 +130,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         return dsp_ota_format(out, cap);
     }
     if (strcmp(cmd, "help") == 0) {
-        return clamp(snprintf(out, cap, "cfg | set <key> <value> | save | reboot | stat | setup [on|off] | dsp [ver|apply]%s\n",
+        return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | setup [on|off] | dsp [ver|apply]%s\n",
                               src == CMD_SRC_LOCAL ? " | defaults" : ""), cap);
     }
     return clamp(snprintf(out, cap, "unknown command '%s' - type help\n", cmd), cap);

@@ -24,3 +24,4 @@ bool net_send_dsp_result(const uint8_t *data, size_t len);   // 메인보드 OTA
 
 void   net_print_status(void);
 size_t net_format_status(char *buf, size_t cap);   // stat 2줄 (wifi / net)
+size_t net_format_status_json(char *buf, size_t cap);   // stat json 한 줄 (UDP 응답 한도 512B 안)

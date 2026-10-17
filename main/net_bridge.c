@@ -321,7 +321,10 @@ static void handle_cfg_cmd(const struct sockaddr_in *src, uint16_t seq, const ui
 
     memcpy(line, pl, n);
     line[n] = '\0';
-    size_t m = cmd_exec(line, CMD_SRC_SERVER, out, sizeof(out), &act);
+    // 응답 끝 표시 ">" 줄 (BR-8) — 앱은 이것을 보고 응답이 끝났음을 안다. 자리 2바이트를 남기고 실행
+    size_t m = cmd_exec(line, CMD_SRC_SERVER, out, sizeof(out) - 2, &act);
+    memcpy(out + m, CMD_END_LINE, sizeof(CMD_END_LINE) - 1);
+    m += sizeof(CMD_END_LINE) - 1;
     send_pkt(src->sin_addr.s_addr, ntohs(src->sin_port), BR_T_CFG_RESULT, seq, (const uint8_t *)out, m);
     if (act == CMD_ACT_REBOOT) {
         // 결과 패킷 송신 여유를 두고 설정 관리 태스크가 재부팅 (net_rx 를 막지 않음).
@@ -502,6 +505,56 @@ size_t net_format_status(char *buf, size_t cap)
                      (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
                      (unsigned long)s_st.disconnects, s_st.last_reason);
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
+}
+
+// stat json — BR-1 형식 (앱·게이트웨이가 파싱). 넘치면 잘린 JSON 대신 {"err":"overflow"} 를 보냄 (호출 태스크 스택 사용)
+size_t net_format_status_json(char *buf, size_t cap)
+{
+    esp_netif_ip_info_t ip = {0};
+    wifi_ap_record_t ap = {0};
+    uint8_t mac[6] = {0};
+    bool up = net_is_up();
+    const uart_stat_t *m = uart_bridge_stat(PORT_MAIN);
+    const uart_stat_t *r = uart_bridge_stat(PORT_RFID);
+    size_t n = 0;
+    size_t d;
+    bool ok = cap > 0;
+
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (s_netif) {
+        esp_netif_get_ip_info(s_netif, &ip);
+    }
+    if (up) {
+        esp_wifi_sta_get_ap_info(&ap);
+    }
+#define JS(...) do { if (ok) { int k_ = snprintf(buf + n, cap - n, __VA_ARGS__); ok = k_ >= 0 && (size_t)k_ < cap - n; if (ok) n += (size_t)k_; } } while (0)
+    JS("{\"fw\":\"%s\",\"part\":\"%s\",\"ota\":\"%s\",\"cfg\":\"%s\",\"up\":%lld,"
+       "\"wifi\":{\"up\":%s,\"mac\":\"" MACSTR "\",\"ip\":\"" IPSTR "\",\"rssi\":%d,\"ch\":%u,\"bssid\":\"" MACSTR "\","
+       "\"disc\":%lu,\"reason\":%u},"
+       "\"net\":{\"tx\":%lu,\"tx_err\":%lu,\"tx_offline\":%lu,\"rx\":%lu,\"rx_bad\":%lu,\"rx_foreign\":%lu},"
+       "\"setup\":{\"on\":%s,\"name\":\"%s\"},\"dsp\":",
+       esp_app_get_description()->version, ota_running_partition(), ota_state_str(), cfg_state_str(),
+       (long long)(esp_timer_get_time() / 1000000),
+       up ? "true" : "false", MAC2STR(mac), IP2STR(&ip.ip), ap.rssi, ap.primary, MAC2STR(ap.bssid),
+       (unsigned long)s_st.disconnects, s_st.last_reason,
+       (unsigned long)s_st.tx_pkts, (unsigned long)s_st.tx_err, (unsigned long)s_st.tx_offline,
+       (unsigned long)s_st.rx_pkts, (unsigned long)s_st.rx_bad, (unsigned long)s_st.rx_foreign,
+       setup_active() ? "true" : "false", setup_name());
+    d = ok ? dsp_ota_format_json(buf + n, cap - n) : 0;
+    ok = ok && d > 0;
+    n += d;
+    JS(",\"uart\":{\"main\":{\"rx_frm\":%lu,\"tx_frm\":%lu,\"err\":%lu,\"tx_drop\":%lu},"
+       "\"rfid\":{\"rx_frm\":%lu,\"err\":%lu}},\"heap\":%lu}",
+       (unsigned long)m->rx_frames, (unsigned long)m->tx_frames,
+       (unsigned long)(m->overflow + m->rx_err + m->overlong + m->no_etx), (unsigned long)m->tx_drop,
+       (unsigned long)r->rx_frames, (unsigned long)(r->overflow + r->rx_err + r->overlong),
+       (unsigned long)esp_get_free_heap_size());
+#undef JS
+    if (!ok) {
+        n = cap > 0 ? (size_t)snprintf(buf, cap, "{\"err\":\"overflow\"}") : 0;
+        return n < cap ? n : (cap ? cap - 1 : 0);
+    }
+    return n;
 }
 
 void net_print_status(void)

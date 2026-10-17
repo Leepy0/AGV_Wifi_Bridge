@@ -37,8 +37,10 @@ esp_err_t cfg_save(bool trial);
 esp_err_t cfg_erase(void);
 void      cfg_print(void);          // 편집 사본 표시
 size_t    cfg_format(char *buf, size_t cap);   // cfg_print 와 같은 내용을 buf 에 기록
+size_t    cfg_format_json(char *buf, size_t cap);   // cfg json 의 "state" 이후 부분 (JSON 객체 끝 '}' 까지)
 void      cfg_get_edit(app_cfg_t *out);        // 편집 사본 복사
 bool      cfg_set(const char *key, const char *val);   // 편집 사본만 변경, 재부팅 후 반영
+void      cfg_discard(void);                   // 편집 사본 = 실행 중 설정 (저장하지 않은 set 되돌림)
 // 여러 키를 한 번에 변경 — 하나라도 잘못되면 아무것도 바꾸지 않고 *bad 에 해당 키
 bool      cfg_set_many(const char *const keys[], const char *const vals[], size_t n, const char **bad);
 bool      cfg_is_saved(void);       // NVS 에 저장된 설정으로 동작 중 (false = 빌드 기본값)

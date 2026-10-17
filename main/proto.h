@@ -9,7 +9,7 @@
 #define BR_MAGIC1       0x5A
 #define BR_VER          1
 #define BR_HDR_LEN      10
-#define BR_PAYLOAD_MAX  512
+#define BR_PAYLOAD_MAX  1024    // 0.6.0 에서 512 → 1024 (cfg json 등). 게이트웨이 0.4.0+ 와 짝 — 이전 서버는 512 넘는 패킷을 버림
 
 typedef enum {
     BR_T_MAIN_UP   = 0x01, // 메인보드 → 서버 (UART 원본 바이트)
