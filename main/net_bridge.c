@@ -507,7 +507,7 @@ size_t net_format_status(char *buf, size_t cap)
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
-// stat json — BR-1 형식 (앱·게이트웨이가 파싱). 넘치면 잘린 JSON 대신 {"err":"overflow"} 를 보냄
+// stat json — BR-1 형식 (앱·게이트웨이가 파싱). 넘치면 잘린 JSON 대신 {"err":"overflow"} 를 보냄 (호출 태스크 스택 사용)
 size_t net_format_status_json(char *buf, size_t cap)
 {
     esp_netif_ip_info_t ip = {0};
@@ -543,9 +543,10 @@ size_t net_format_status_json(char *buf, size_t cap)
     d = ok ? dsp_ota_format_json(buf + n, cap - n) : 0;
     ok = ok && d > 0;
     n += d;
-    // uart 는 줄여서 512B 안에 맞춤 (자세한 counter 는 콘솔 stat 텍스트)
-    JS(",\"uart\":{\"main\":{\"rx_frm\":%lu,\"err\":%lu},\"rfid\":{\"rx_frm\":%lu,\"err\":%lu}},\"heap\":%lu}",
-       (unsigned long)m->rx_frames, (unsigned long)(m->overflow + m->rx_err + m->overlong + m->no_etx),
+    JS(",\"uart\":{\"main\":{\"rx_frm\":%lu,\"tx_frm\":%lu,\"err\":%lu,\"tx_drop\":%lu},"
+       "\"rfid\":{\"rx_frm\":%lu,\"err\":%lu}},\"heap\":%lu}",
+       (unsigned long)m->rx_frames, (unsigned long)m->tx_frames,
+       (unsigned long)(m->overflow + m->rx_err + m->overlong + m->no_etx), (unsigned long)m->tx_drop,
        (unsigned long)r->rx_frames, (unsigned long)(r->overflow + r->rx_err + r->overlong),
        (unsigned long)esp_get_free_heap_size());
 #undef JS

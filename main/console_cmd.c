@@ -18,7 +18,7 @@ static const char *TAG = "console";
 
 static int cmd_cfg(int argc, char **argv)
 {
-    char js[768];
+    static char js[768];                // 콘솔 태스크 스택 절약 (명령은 한 번에 하나)
     if (argc == 2 && strcmp(argv[1], "json") == 0) {
         cmd_cfg_json(js, sizeof(js));
         puts(js);
@@ -98,7 +98,7 @@ static int cmd_stat(int argc, char **argv)
 {
     char su[160];
     if (argc == 2 && strcmp(argv[1], "json") == 0) {
-        char js[768];
+        static char js[768];
         net_format_status_json(js, sizeof(js));
         puts(js);
         return 0;
