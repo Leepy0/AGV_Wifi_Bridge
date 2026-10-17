@@ -11,13 +11,27 @@
 #include "setup.h"
 #include "dsp_ota.h"
 #include "esp_app_desc.h"
+#include "cmd.h"
 #include "console_cmd.h"
 
 static const char *TAG = "console";
 
 static int cmd_cfg(int argc, char **argv)
 {
+    char js[768];
+    if (argc == 2 && strcmp(argv[1], "json") == 0) {
+        cmd_cfg_json(js, sizeof(js));
+        puts(js);
+        return 0;
+    }
     cfg_print();
+    return 0;
+}
+
+static int cmd_discard(int argc, char **argv)
+{
+    cfg_discard();
+    printf("discarded - edit copy now equals running config\n");
     return 0;
 }
 
@@ -83,6 +97,12 @@ static void print_uart(const char *name, const uart_stat_t *s)
 static int cmd_stat(int argc, char **argv)
 {
     char su[160];
+    if (argc == 2 && strcmp(argv[1], "json") == 0) {
+        char js[768];
+        net_format_status_json(js, sizeof(js));
+        puts(js);
+        return 0;
+    }
     net_print_status();
     setup_format(su, sizeof(su));
     fputs(su, stdout);
@@ -212,12 +232,13 @@ void console_start(void)
     }
 
     const esp_console_cmd_t cmds[] = {
-        { .command = "cfg",      .help = "show config",                         .func = cmd_cfg },
+        { .command = "cfg",      .help = "show config [json]",                  .func = cmd_cfg },
         { .command = "set",      .help = "set <key> <value> (run without args for keys)", .func = cmd_set },
         { .command = "save",     .help = "save config to NVS",                  .func = cmd_save },
+        { .command = "discard",  .help = "undo unsaved set (edit copy = running config)", .func = cmd_discard },
         { .command = "defaults", .help = "erase saved config (build defaults on reboot)", .func = cmd_defaults },
         { .command = "reboot",   .help = "restart",                             .func = cmd_reboot },
-        { .command = "stat",     .help = "wifi / network / uart counters",      .func = cmd_stat },
+        { .command = "stat",     .help = "wifi / network / uart counters [json]", .func = cmd_stat },
         { .command = "mon",      .help = "mon <0|1> : hex dump every frame",    .func = cmd_mon },
         { .command = "log",      .help = "log <none|error|warn|info|debug|verbose> : runtime log level", .func = cmd_log },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },

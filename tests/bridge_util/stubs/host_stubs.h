@@ -67,3 +67,4 @@ int       esp_https_ota_get_image_len_read(esp_https_ota_handle_t h);
 esp_err_t esp_https_ota_perform(esp_https_ota_handle_t h);
 bool      esp_https_ota_is_complete_data_received(esp_https_ota_handle_t h);
 esp_err_t esp_https_ota_finish(esp_https_ota_handle_t h);
+const char *esp_get_idf_version(void);

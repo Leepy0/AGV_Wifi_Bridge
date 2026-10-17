@@ -15,6 +15,7 @@ esp_err_t setup_init(void);             // net_bridge_start 성공 후 호출 (�
 void      setup_request(bool open);
 bool      setup_active(void);
 size_t    setup_format(char *buf, size_t cap);   // 상태 한 줄
+const char *setup_name(void);           // 장치 이름 AGVBR-<호기>-<MAC 끝 4자리> (BLE 이름 · AP SSID · stat json)
 // 응답 송신 여유를 두고 재부팅 (reopen = 재부팅 후 설정 모드 다시 열기). 메인보드 프로그래밍 중이면 끝난 뒤 재부팅
 void      setup_reboot(bool reopen);
 void      setup_wake(void);             // 전송 계층 → 관리 태스크 깨움 (BLE 수신 등)

@@ -925,6 +925,27 @@ size_t dsp_ota_status_json(char *buf, size_t cap)
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
+// stat json 의 "dsp" 객체 — dsp_ota_status_json 과 같은 값을 중첩 형식으로
+size_t dsp_ota_format_json(char *buf, size_t cap)
+{
+    char v[72], b[72], d[72], s[100];
+    dap_json_escape(v, sizeof(v), s_dsp_ver);
+    dap_json_escape(b, sizeof(b), s_dsp_boot);
+    dap_json_escape(d, sizeof(d), s_dsp_build);
+    int n = snprintf(buf, cap, "{\"app\":\"%s\",\"boot\":\"%s\",\"build\":\"%s\",\"st\":\"%s\",\"staged\":",
+                     v, b, d, s_part ? ST_NAME[s_state] : "nopart");
+    if (n < 0 || (size_t)n >= cap) {
+        return 0;
+    }
+    if (s_stage.magic[0]) {
+        dap_json_escape(s, sizeof(s), s_stage.ver);
+        n += snprintf(buf + n, cap - n, "{\"job\":%lu,\"ver\":\"%s\"}}", (unsigned long)s_stage.job, s);
+    } else {
+        n += snprintf(buf + n, cap - n, "null}");
+    }
+    return (size_t)n < cap ? (size_t)n : 0;
+}
+
 size_t dsp_ota_format(char *buf, size_t cap)
 {
     int n = snprintf(buf, cap, "dsp : app=%s boot=%s build=%s state=%s staged=%s(job %lu) pan=%c\n",

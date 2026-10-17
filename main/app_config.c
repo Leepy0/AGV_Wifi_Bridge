@@ -11,6 +11,7 @@
 #include "sdkconfig.h"
 #include "app_config.h"
 #include "bridge_util.h"
+#include "dsp_app_proto.h"
 
 static const char *TAG = "cfg";
 static const char *NVS_NS      = "bridge";
@@ -333,6 +334,7 @@ void cfg_get_edit(app_cfg_t *out)
 }
 
 // 편집 사본 내용 (콘솔 cfg / 서버 원격 cfg 공용). 실행 중 설정과 다르면 안내
+// 이 텍스트는 앱·게이트웨이가 파싱하는 인터페이스 — 형식을 바꾸면 호환 표(README·FLASH_GUIDE)를 갱신할 것
 size_t cfg_format(char *buf, size_t cap)
 {
     app_cfg_t c;
@@ -358,6 +360,32 @@ size_t cfg_format(char *buf, size_t cap)
     }
 #undef OUT
     return n < cap ? n : (cap ? cap - 1 : 0);
+}
+
+// 'cfg json' — 앱이 읽는 기계용 형식. 여기서는 "state" 부터 끝까지, 앞 필드는 cmd.c 가 붙인다
+size_t cfg_format_json(char *buf, size_t cap)
+{
+    static const char KEYS[] = "[\"agv\",\"ssid\",\"pass\",\"ip\",\"mask\",\"gw\",\"dns\",\"dns2\",\"server\",\"server_port\","
+                               "\"local_port\",\"rfid_dst\",\"rfid_port\",\"main_baud\",\"rfid_baud\",\"hb_ms\"]";
+    app_cfg_t c;
+    char ssid[200], ip[7][16];      // ip_str 는 호출마다 버퍼가 따로 필요 (한 printf 안에서 여러 개 사용)
+    cfg_get_edit(&c);
+    dap_json_escape(ssid, sizeof(ssid), c.ssid);
+    // 0 = 자동 표기 (dhcp / off / auto) — 텍스트 cfg 출력과 같은 표기
+    return snprintf(buf, cap, "\"state\":\"%s\",\"differs\":%s,"
+                    "\"cfg\":{\"agv\":%u,\"ssid\":\"%s\",\"pass_len\":%u,\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\","
+                    "\"dns\":\"%s\",\"dns2\":\"%s\",\"server\":\"%s\",\"server_port\":%u,\"local_port\":%u,"
+                    "\"rfid_dst\":\"%s\",\"rfid_port\":%u,\"main_baud\":%lu,\"rfid_baud\":%lu,\"hb_ms\":%u},"
+                    "\"keys\":%s}",
+                    cfg_state_str(), memcmp(&c, &g_cfg, sizeof(g_cfg)) != 0 ? "true" : "false",
+                    c.agv_id, ssid, (unsigned)strlen(c.pass),
+                    c.static_ip ? ip_str(c.static_ip, ip[0], sizeof(ip[0])) : "dhcp",
+                    ip_str(c.netmask, ip[1], sizeof(ip[1])), ip_str(c.gateway, ip[2], sizeof(ip[2])),
+                    c.dns_primary ? ip_str(c.dns_primary, ip[3], sizeof(ip[3])) : "auto",
+                    c.dns_secondary ? ip_str(c.dns_secondary, ip[4], sizeof(ip[4])) : "auto",
+                    ip_str(c.server_ip, ip[5], sizeof(ip[5])), c.server_port, c.local_port,
+                    c.rfid_dst_ip ? ip_str(c.rfid_dst_ip, ip[6], sizeof(ip[6])) : "off", c.rfid_dst_port,
+                    (unsigned long)c.main_baud, (unsigned long)c.rfid_baud, c.hb_ms, KEYS);
 }
 
 void cfg_print(void)
@@ -436,6 +464,14 @@ bool cfg_set(const char *key, const char *val)
     bool ok = apply(&s_edit, key, val);
     xSemaphoreGive(s_lock);
     return ok;
+}
+
+// 편집 사본을 실행 중 설정으로 되돌림 (set 으로 바뀐 값 취소)
+void cfg_discard(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_edit = g_cfg;
+    xSemaphoreGive(s_lock);
 }
 
 bool cfg_set_many(const char *const keys[], const char *const vals[], size_t n, const char **bad)

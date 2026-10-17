@@ -79,6 +79,11 @@ bool setup_active(void)
     return s_on;
 }
 
+const char *setup_name(void)
+{
+    return s_name;
+}
+
 // 응답 송신 여유를 두고 재부팅. 메인보드 프로그래밍 중이면 끝날 때까지 미룸
 // (지운 뒤 재부팅하면 메인보드가 앱 없이 부트로더에 남는다)
 static void do_reboot(void)
@@ -185,20 +190,31 @@ static void close_all(void)
 }
 
 #if CONFIG_BR_SETUP_BLE
+// 응답 뒤에 끝 표시 줄(CMD_END_LINE)을 붙임 (BR-8) — 앱은 이 줄로 응답 끝을 알고 다음 명령을 보냄
+static void ble_reply(const char *s, size_t n)
+{
+    sble_send(s, n);
+    sble_send(CMD_END_LINE, sizeof(CMD_END_LINE) - 1);
+}
+
 // BLE 로 받은 명령 처리 — 콘솔과 같은 문법. 비밀번호가 설정돼 있으면 'login <비밀번호>' 후 사용
 static void ble_poll(void)
 {
     static char line[CMD_LINE_MAX];
-    static char out[600];
+    static char out[768];               // cfg json 최대 길이(SSID 32자 기준 ~630B) 를 담을 수 있게
     static uint32_t authed_session;     // 로그인한 연결 (0 = 없음)
     static bu_login_guard_t guard;      // 연결별 로그인 연속 실패 계수
     cmd_act_t act;
+    uint8_t mac[6] = {0};
     size_t n;
 
     if (sble_take_subscribed()) {
-        n = snprintf(out, sizeof(out), "AGV Wi-Fi Bridge %s (fw %s)\n%s\n", s_name, esp_app_get_description()->version,
+        // 로그인 전에 MAC · 설정 상태를 알려서 설치 보드를 목록에서 구분 (BR-9)
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        n = snprintf(out, sizeof(out), "AGV Wi-Fi Bridge %s (fw %s) mac=" MACSTR " cfg=%s\n%s\n", s_name,
+                     esp_app_get_description()->version, MAC2STR(mac), cfg_state_str(),
                      BLE_PASS[0] ? "login <password>" : "type help");
-        sble_send(out, n);
+        ble_reply(out, n);
     }
     while (sble_take_line(line, sizeof(line))) {
         if (line[0] == '\0') {
@@ -216,22 +232,22 @@ static void ble_poll(void)
                     // 같은 연결에서 연속 5회 실패 → 연결을 끊음 (다시 접속해야 재시도 가능)
                     ESP_LOGW(TAG, "BLE login failed %d times - disconnecting", BU_LOGIN_MAX_FAILS);
                     n = snprintf(out, sizeof(out), "wrong password - too many failures, disconnecting\n");
-                    sble_send(out, n);
+                    ble_reply(out, n);
                     sble_disconnect();
                     break;              // 남은 입력은 버림 (다음 연결에서 s_rx 초기화)
                 }
                 n = snprintf(out, sizeof(out), "wrong password\n");
             }
-            sble_send(out, n);
+            ble_reply(out, n);
             continue;
         }
         if (BLE_PASS[0] && authed_session != sble_session()) {
             n = snprintf(out, sizeof(out), "login required: login <password>\n");
-            sble_send(out, n);
+            ble_reply(out, n);
             continue;
         }
         n = cmd_exec(line, CMD_SRC_LOCAL, out, sizeof(out), &act);
-        sble_send(out, n);
+        ble_reply(out, n);
         if (act == CMD_ACT_REBOOT) {
             setup_reboot(true);         // 재부팅 후 BLE 다시 열기 → 다시 접속해 'stat' 으로 Wi-Fi 연결 확인
         }
