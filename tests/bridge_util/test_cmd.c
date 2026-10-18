@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "setup.h"
 #include "dsp_ota.h"
+#include "timesync.h"
 #include "cmd.h"
 #include "test_common.h"
 
@@ -15,6 +16,8 @@ static bool s_dsp_prog;
 static int s_saves;
 static bool s_last_trial;
 
+static int s_time_lines;
+size_t timesync_format(char *buf, size_t cap) { s_time_lines++; return (size_t)snprintf(buf, cap, "time: not synced (asking the server, 0 tries)\n"); }
 static bool s_dsp_stage;
 static char s_test_host[40];
 static int s_scans, s_tests;
@@ -159,6 +162,15 @@ int main(void)
     s_dsp_prog = false;
     run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
     CHECK(strstr(out, "scan") != NULL && strstr(out, "nettest [host]") != NULL);
+
+    // 시각 동기: time 명령, stat 텍스트에도 한 줄
+    run("time", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(strncmp(out, "time: ", 6) == 0);
+    int before = s_time_lines;
+    run("stat", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_time_lines == before + 1 && strstr(out, "time: not synced") != NULL);
+    run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(strstr(out, "| time |") != NULL);
 
     // 빈 줄은 cfg 텍스트 (strtok 결과 NULL 경로)
     run("", CMD_SRC_LOCAL, out, sizeof(out), &act);
