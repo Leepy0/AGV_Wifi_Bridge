@@ -1,7 +1,7 @@
 CONFIG_IDF_TARGET="esp32s3"
 
-# 플래시/파티션 (S3 보드는 대부분 4MB 이상) — OTA 두 슬롯 (partitions.csv)
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# 플래시/파티션: ESP32-S3 N16 (16MB) 전용 (0.9.0~, 4MB 보드 미지원) — OTA 두 슬롯 + dspfw + dsppkg (partitions.csv)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 

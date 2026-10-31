@@ -201,7 +201,7 @@ static void ble_reply(const char *s, size_t n)
 static void ble_poll(void)
 {
     static char line[CMD_LINE_MAX];
-    static char out[768];               // cfg json 최대 길이(SSID 32자 기준 ~630B) 를 담을 수 있게
+    static char out[1024];              // cfg json(~630B)·stat json(pkg 포함 ~900B) 을 담을 수 있게
     static uint32_t authed_session;     // 로그인한 연결 (0 = 없음)
     static bu_login_guard_t guard;      // 연결별 로그인 연속 실패 계수
     cmd_act_t act;

@@ -121,9 +121,9 @@ static void print_uart(const char *name, const uart_stat_t *s)
 
 static int cmd_stat(int argc, char **argv)
 {
-    char su[160];
+    static char su[256];                // dsp 한 줄(pkg 포함) ~180 B
     if (argc == 2 && strcmp(argv[1], "json") == 0) {
-        static char js[768];
+        static char js[1024];           // dsp 객체에 pkg 가 붙어 최대 ~900 B (0.9.0~)
         net_format_status_json(js, sizeof(js));
         puts(js);
         return 0;
@@ -177,9 +177,15 @@ static int cmd_setup(int argc, char **argv)
 // dsp          : 메인보드 펌웨어 상태 (앱/부트로더 버전, 스테이징)
 // dsp ver      : 버전 다시 조회
 // dsp apply    : 스테이징된 이미지 적용 (벤치용 — 현장은 서버 DSP_OTA_APPLY)
+// dsp pkg      : 보관된 메인보드 패키지(.dsppkg) 슬롯 2개 상태
 static int cmd_dsp(int argc, char **argv)
 {
-    char buf[160];
+    static char buf[320];               // 콘솔 태스크 스택 절약
+    if (argc == 2 && strcmp(argv[1], "pkg") == 0) {
+        dsp_ota_pkg_format(buf, sizeof(buf));
+        fputs(buf, stdout);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "ver") == 0) {
         dsp_ota_query_version();
         printf("version query sent\n");
@@ -271,7 +277,7 @@ void console_start(void)
         { .command = "log",      .help = "log <none|error|warn|info|debug|verbose> : runtime log level", .func = cmd_log },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
         { .command = "setup",    .help = "setup [on|off] : wireless setup mode (phone BLE)", .func = cmd_setup },
-        { .command = "dsp",      .help = "dsp [ver|apply] : main board firmware status / query / apply staged", .func = cmd_dsp },
+        { .command = "dsp",      .help = "dsp [ver|apply|pkg] : main board firmware status / query / apply staged / stored packages", .func = cmd_dsp },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_console_cmd_register(&cmds[i]));

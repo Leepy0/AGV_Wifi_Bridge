@@ -17,6 +17,7 @@
 #include "dsp_image.h"
 #include "bootproto.h"
 #include "dsp_app_proto.h"
+#include "dsp_pkg.h"
 #include "dsp_ota.h"
 
 static const char *TAG = "dsp_ota";
@@ -70,6 +71,11 @@ typedef struct {
     uint32_t   size;        // 서버가 준 파일 크기 (0 = 미지정)
     bool       recover;     // 복구 적용: 앱이 침묵(U 무응답·앱 프레임 없음)하면 부트로더로 직행, HELLO 실패 시 전원 재투입 대기
     char       url[200];    // 199자 초과는 url_too_long 으로 거부 (잘라 쓰지 않음)
+    // 짝 패키지(.dsppkg) — START 필수 (0.9.0~, 게이트웨이 0.7.0+). 없거나 형식이 틀리면 no_pkg
+    char       pkg_url[200];
+    uint32_t   pkg_size;
+    uint8_t    pkg_sha[32];
+    char       pkg_id[17];
 } cmd_t;
 
 typedef enum { ST_IDLE, ST_DOWNLOADING, ST_STAGED, ST_PROGRAMMING } state_t;
@@ -90,6 +96,12 @@ static SemaphoreHandle_t s_reply_sem;
 static volatile char     s_wait_msg;        // 기다리는 MSG ID (0 = 없음)
 static dap_reply_t       s_reply;
 static uint8_t           s_http[HTTP_BUF];
+// 받기 진행률: 패키지 + .dspfw 합계 바이트 기준 (stage 이름은 download 하나)
+static struct {
+    uint32_t base;          // 앞서 받은 바이트 (.dspfw 단계 = 패키지 크기)
+    uint32_t total;         // 합계 (.dspfw 크기를 모르면 파티션 최대로 어림 → pct 가 줄지 않음)
+    int      last_pct;
+} s_dl;
 // 서버 재전송 대비 (같은 job 의 중복 명령). 처리 중인 job 은 dsp 태스크만 쓰고 서버 수신 태스크는 읽기만 한다
 static volatile uint32_t s_cur_start;       // 처리 중인 START 의 job (apply:1 이면 이어지는 적용까지), 0 = 없음
 static volatile uint32_t s_cur_apply;       // 적용 중인 job, 0 = 없음
@@ -351,6 +363,88 @@ static const char *stage_check(uint32_t file_len, uint32_t *file_crc, uint16_t *
 
 // ───────── 다운로드 ─────────
 
+// 받은 바이트(이 단계 안의 위치) → download pct 보고 (20% 단위)
+static void dl_progress(uint32_t job, uint32_t pos)
+{
+    uint32_t done = s_dl.base + pos;
+    int pct = s_dl.total ? (int)((uint64_t)done * 100 / s_dl.total) : 100;
+    if (pct > 100) {
+        pct = 100;
+    }
+    if (pct / 20 != s_dl.last_pct / 20) {
+        s_dl.last_pct = pct;
+        report(job, "download", pct, NULL, NULL);
+    }
+}
+
+// HTTP GET 열기 → 200 이면 NULL, *clen = Content-Length. pkg = 패키지 받기 (오류 이름에 pkg_ 접두사)
+// esp_http_client_open 은 3xx 를 따라가지 않으므로 Location 으로 다시 연다 (esp_https_ota 와 같은 동작)
+static const char *http_get(esp_http_client_handle_t h, bool pkg, int64_t *clen)
+{
+    int status = 0;
+    for (int redirects = 0; ; redirects++) {
+        if (esp_http_client_open(h, 0) != ESP_OK) {
+            return pkg ? "pkg_http_open" : "http_open";
+        }
+        *clen = esp_http_client_fetch_headers(h);
+        status = esp_http_client_get_status_code(h);
+        if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && redirects < MAX_REDIRECTS) {
+            esp_http_client_set_redirection(h);
+            esp_http_client_close(h);
+            // 리다이렉트로 다른 호스트에 가지 않게 (결정 11)
+            char cur[sizeof(((cmd_t *)0)->url)];
+            if (esp_http_client_get_url(h, cur, sizeof(cur)) != ESP_OK || !url_host_ok(cur)) {
+                return pkg ? "pkg_url_host" : "url_host";
+            }
+            continue;
+        }
+        break;
+    }
+    return status == 200 ? NULL : (pkg ? "pkg_http_status" : "http_status");
+}
+
+// 패키지(.dsppkg)를 받아 dsppkg 빈 슬롯에 기록 (4KB 씩 지우며, sha256 스트리밍 확인). 슬롯은 아직 bit0=1 (finalize 전)
+static const char *download_pkg(const cmd_t *c)
+{
+    esp_http_client_config_t hc = { .url = c->pkg_url, .timeout_ms = 10000, .buffer_size = HTTP_BUF };
+    esp_http_client_handle_t h = esp_http_client_init(&hc);
+    if (!h) {
+        return "pkg_http_init";
+    }
+    int64_t clen = 0;
+    const char *err = http_get(h, true, &clen);
+    if (!err && clen != (int64_t)c->pkg_size) {
+        err = "pkg_size";
+    }
+    if (!err) {
+        err = dsp_pkg_begin(c->pkg_size, c->job, c->pkg_id, c->pkg_sha);
+    }
+    for (uint32_t pos = 0; !err;) {
+        int n = esp_http_client_read(h, (char *)s_http, HTTP_BUF);
+        if (n < 0) {
+            err = "pkg_http_read";
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+        if ((err = dsp_pkg_write(s_http, (size_t)n)) != NULL) {
+            break;
+        }
+        pos += (uint32_t)n;
+        dl_progress(c->job, pos);
+    }
+    if (!err) {
+        err = dsp_pkg_end();                // 크기(pkg_size)·sha256(pkg_sha)
+    }
+    esp_http_client_close(h);
+    esp_http_client_cleanup(h);
+    if (err) {
+        dsp_pkg_abort();
+    }
+    return err;
+}
+
 static const char *download(const cmd_t *c)
 {
     esp_http_client_config_t hc = { .url = c->url, .timeout_ms = 10000, .buffer_size = HTTP_BUF };
@@ -358,33 +452,10 @@ static const char *download(const cmd_t *c)
     if (!h) {
         return "http_init";
     }
-    const char *err = NULL;
     uint32_t pos = 0;
     int64_t clen = 0;
-    int status = 0;
-    // esp_http_client_open 은 3xx 를 따라가지 않으므로 Location 으로 다시 연다 (esp_https_ota 와 같은 동작)
-    for (int redirects = 0; ; redirects++) {
-        if (esp_http_client_open(h, 0) != ESP_OK) {
-            err = "http_open";
-            goto out;
-        }
-        clen = esp_http_client_fetch_headers(h);
-        status = esp_http_client_get_status_code(h);
-        if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && redirects < MAX_REDIRECTS) {
-            esp_http_client_set_redirection(h);
-            esp_http_client_close(h);
-            // 리다이렉트로 다른 호스트에 가지 않게 (결정 11)
-            char cur[sizeof(c->url)];
-            if (esp_http_client_get_url(h, cur, sizeof(cur)) != ESP_OK || !url_host_ok(cur)) {
-                err = "url_host";
-                goto out;
-            }
-            continue;
-        }
-        break;
-    }
-    if (status != 200) {
-        err = "http_status";
+    const char *err = http_get(h, false, &clen);
+    if (err) {
         goto out;
     }
     if (clen < PEEK_LEN || clen > (int64_t)(s_part->size - STAGE_HDR_LEN) || (c->size && clen != c->size)) {
@@ -424,7 +495,7 @@ static const char *download(const cmd_t *c)
         goto out;
     }
     erased = 4096;
-    int last_pct = -1;
+    s_dl.total = s_dl.base + (uint32_t)clen;
     for (;;) {
         if (n == 0) {                       // 첫 조각(머리)은 이미 s_http 에 있음
             n = esp_http_client_read(h, (char *)s_http, HTTP_BUF);
@@ -454,11 +525,7 @@ static const char *download(const cmd_t *c)
         }
         pos += n;
         n = 0;
-        int pct = (int)(pos * 100 / clen);
-        if (pct / 20 != last_pct / 20) {
-            last_pct = pct;
-            report(c->job, "download", pct, NULL, NULL);
-        }
+        dl_progress(c->job, pos);
     }
     if (pos != (uint32_t)clen) {
         err = "http_short";
@@ -484,6 +551,28 @@ static const char *download(const cmd_t *c)
 out:
     esp_http_client_close(h);
     esp_http_client_cleanup(h);
+    return err;
+}
+
+// 스테이징 (START): 패키지 → .dspfw 순서로 받고, 둘 다 끝나면 패키지 슬롯을 짝(.dspfw 파일 CRC)으로 확정 (bit0 → 0).
+// 어느 하나라도 실패하면 패키지 슬롯은 bit0=1 로 남아 무시된다
+static const char *stage(const cmd_t *c)
+{
+    s_dl.base     = 0;
+    s_dl.total    = c->pkg_size + (c->size ? c->size : (uint32_t)(s_part->size - STAGE_HDR_LEN));    // .dspfw 크기를 모르면 최대로
+    s_dl.last_pct = -1;
+    const char *err = download_pkg(c);
+    if (err) {
+        return err;
+    }
+    s_dl.base = c->pkg_size;
+    if ((err = download(c)) != NULL) {
+        dsp_pkg_abort();
+        return err;
+    }
+    if ((err = dsp_pkg_finalize(s_stage.file_crc, s_stage.ver)) != NULL) {
+        stage_clear();                      // 짝 패키지 없는 스테이징은 남기지 않는다
+    }
     return err;
 }
 
@@ -711,6 +800,17 @@ static const char *apply(uint32_t job, bool recover)
         s_state = ST_STAGED;
         return strcmp(err, "image_crc") == 0 ? "stage_invalid" : err;
     }
+    // 짝 패키지 확인 (메인보드를 지우기 전): STAGED 슬롯 중 dspfw_crc == 스테이징 파일 CRC, flash 에서 sha256 다시 계산
+    if (!dsp_pkg_ready()) {
+        s_state = ST_STAGED;
+        return "pkg_nopart";
+    }
+    const int slot = dsp_pkg_find_staged(fcrc);
+    if (slot < 0 || (err = dsp_pkg_verify(slot)) != NULL) {
+        ESP_LOGW(TAG, "no paired package for staged image (crc %08lx)%s%s", (unsigned long)fcrc, err ? ": " : "", err ? err : "");
+        s_state = ST_STAGED;
+        return "no_pkg";
+    }
     bool erased = false;
     err = program(job, apphdr, &ah, true, recover, &erased);
     // 지운 뒤 실패: 부트로더가 업데이트 모드에 머물러 있으므로 U 없이 HELLO 부터 다시 (메인보드에 앱이 없는 채로 끝내지 않게)
@@ -739,6 +839,10 @@ static const char *apply(uint32_t job, bool recover)
     if (strcmp(s_dsp_ver, newver) != 0) {
         s_state = ST_STAGED;
         return "ver_mismatch";
+    }
+    // 이 패키지가 메인보드에서 도는 프로그램의 원본 — APPLIED, 이전 APPLIED 는 OLD
+    if ((err = dsp_pkg_mark_applied(slot)) != NULL) {
+        ESP_LOGE(TAG, "package slot %d: mark applied failed (%s)", slot, err);     // 굽기는 끝났으므로 done 은 그대로
     }
     stage_clear();
     s_state = ST_IDLE;
@@ -777,7 +881,7 @@ static void handle_cmd(const cmd_t *c)
             // 위 apply() 와 같은 이유 (ota.c 의 s_busy 와 상호 배제)
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
             // 브리지 자체 OTA 가 진행 중이면 받지 않는다 (OTA 뒤 재부팅이 스테이징을 끊음). 상태를 먼저 세운 뒤 확인
-            const char *err = ota_busy() ? "esp_ota_busy" : download(c);
+            const char *err = ota_busy() ? "esp_ota_busy" : stage(c);
             if (err) {
                 stage_load();           // 이전 스테이징이 남아 있으면 복원
                 s_state = s_stage.magic[0] ? ST_STAGED : ST_IDLE;
@@ -839,6 +943,54 @@ static void dsp_task(void *arg)
 // 여기서는 처리 중인 job(s_cur_start·s_cur_apply, 32비트 한 번 읽기)과 같을 때만 큐에 넣지 않고 버린다.
 // 읽은 직후 처리가 끝나도 그 명령은 큐로 가서 dsp 태스크가 최근 결과를 다시 보고하므로 어느 쪽이든 결과는 같다
 
+static int hexval(char ch)
+{
+    return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
+}
+
+// 소문자 hex 정확히 n 자
+static bool lower_hex(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (hexval(s[i]) < 0) {
+            return false;
+        }
+    }
+    return s[n] == '\0';
+}
+
+// 짝 패키지 필드 (모두 필수): pkg_url · pkg_size · pkg_sha256(소문자 hex 64) · pkg_id(소문자 hex 16).
+// NULL = 정상. no_pkg (없음·형식 오류) / pkg_nopart / pkg_too_big / pkg_url_too_long / pkg_url_host
+static const char *parse_pkg(const char *json, size_t len, cmd_t *c)
+{
+    char sha[65];
+    int ru = dap_json_str(json, len, "pkg_url", c->pkg_url, sizeof(c->pkg_url));
+    int rs = dap_json_str(json, len, "pkg_sha256", sha, sizeof(sha));
+    int ri = dap_json_str(json, len, "pkg_id", c->pkg_id, sizeof(c->pkg_id));
+    c->pkg_size = dap_json_u32(json, len, "pkg_size");
+    if (ru == DAP_JSON_MISSING || rs != DAP_JSON_OK || ri != DAP_JSON_OK || c->pkg_size == 0 ||
+        !lower_hex(sha, 64) || !lower_hex(c->pkg_id, 16) || (ru == DAP_JSON_OK && strncmp(c->pkg_url, "http", 4) != 0)) {
+        return "no_pkg";
+    }
+    if (!dsp_pkg_ready()) {
+        return "pkg_nopart";
+    }
+    if (c->pkg_size > DSP_PKG_MAX) {
+        return "pkg_too_big";
+    }
+    if (ru == DAP_JSON_TOO_LONG) {
+        return "pkg_url_too_long";
+    }
+    if (!url_host_ok(c->pkg_url)) {
+        ESP_LOGW(TAG, "package url host is not the configured server: %s", c->pkg_url);
+        return "pkg_url_host";
+    }
+    for (int i = 0; i < 32; i++) {
+        c->pkg_sha[i] = (uint8_t)(hexval(sha[i * 2]) << 4 | hexval(sha[i * 2 + 1]));
+    }
+    return NULL;
+}
+
 void dsp_ota_start(const char *json, size_t len)
 {
     cmd_t c = { .type = CMD_START };
@@ -860,6 +1012,13 @@ void dsp_ota_start(const char *json, size_t len)
     if (!url_host_ok(c.url)) {
         ESP_LOGW(TAG, "staging url host is not the configured server: %s", c.url);
         report_final_ex(c.job, "fail", -1, NULL, "url_host", false);
+        return;
+    }
+    const char *perr = parse_pkg(json, len, &c);
+    if (perr) {
+        ESP_LOGW(TAG, "job %lu: START refused (%s) - gateway 0.7.0+ sends the package (pkg_*) with every mainboard job",
+                 (unsigned long)c.job, perr);
+        report_final_ex(c.job, "fail", -1, NULL, perr, false);
         return;
     }
     dap_json_str(json, len, "ver", c.ver, sizeof(c.ver));
@@ -904,10 +1063,65 @@ bool dsp_ota_staging(void)
     return s_state == ST_DOWNLOADING;
 }
 
+// 상태 표시용 패키지 정보 (다른 태스크에서 읽음 — 슬롯 머리를 복사해 쓴다)
+typedef struct {
+    bool ok;                // dsppkg 파티션 있음
+    char cur_id[17];        // 현재 APPLIED 패키지 ("" = 없음)
+    char cur_ver[40];       // 이스케이프된 버전
+    char staged_id[17];     // 스테이징된 .dspfw 의 짝 STAGED 패키지 ("" = 없음)
+} pkg_view_t;
+
+static void pkg_view(pkg_view_t *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->ok = dsp_pkg_ready();
+    if (!v->ok) {
+        return;
+    }
+    int cur = dsp_pkg_current();
+    if (cur >= 0) {
+        dsp_pkg_slot_t sl = *dsp_pkg_slot(cur);
+        sl.id[16] = sl.ver[15] = '\0';
+        strlcpy(v->cur_id, sl.id, sizeof(v->cur_id));
+        dap_json_escape(v->cur_ver, sizeof(v->cur_ver), sl.ver);
+    }
+    stage_hdr_t st = s_stage;
+    int sp = st.magic[0] ? dsp_pkg_find_staged(st.file_crc) : -1;
+    if (sp >= 0) {
+        dsp_pkg_slot_t sl = *dsp_pkg_slot(sp);
+        sl.id[16] = '\0';
+        strlcpy(v->staged_id, sl.id, sizeof(v->staged_id));
+    }
+}
+
+// "staged":{..}|null 뒤에 "pkg_st"·"dsp_pkg" (nested = stat json 의 dsp 객체 안: "pkg" 이름)
+static int status_tail(char *buf, size_t cap, bool nested)
+{
+    pkg_view_t pv;
+    char s[100];
+    int n;
+    pkg_view(&pv);
+    if (s_stage.magic[0]) {
+        dap_json_escape(s, sizeof(s), s_stage.ver);
+        n = snprintf(buf, cap, "{\"job\":%lu,\"ver\":\"%s\"%s%s%s}", (unsigned long)s_stage.job, s,
+                     pv.staged_id[0] ? ",\"pkg\":\"" : "", pv.staged_id, pv.staged_id[0] ? "\"" : "");
+    } else {
+        n = snprintf(buf, cap, "null");
+    }
+    if (n < 0 || (size_t)n >= cap) {
+        return n;
+    }
+    int k = pv.cur_id[0]
+          ? snprintf(buf + n, cap - n, ",\"pkg_st\":\"%s\",\"%s\":{\"id\":\"%s\",\"ver\":\"%s\"}", pv.ok ? "ok" : "nopart",
+                     nested ? "pkg" : "dsp_pkg", pv.cur_id, pv.cur_ver)
+          : snprintf(buf + n, cap - n, ",\"pkg_st\":\"%s\",\"%s\":null", pv.ok ? "ok" : "nopart", nested ? "pkg" : "dsp_pkg");
+    return k < 0 ? k : n + k;
+}
+
 size_t dsp_ota_status_json(char *buf, size_t cap)
 {
     // 메인보드 응답·부트로더 HELLO·스테이징에서 온 문자열 → 이스케이프
-    char v[72], b[72], d[72], s[100];
+    char v[72], b[72], d[72];
     dap_json_escape(v, sizeof(v), s_dsp_ver);
     dap_json_escape(b, sizeof(b), s_dsp_boot);
     dap_json_escape(d, sizeof(d), s_dsp_build);
@@ -915,12 +1129,8 @@ size_t dsp_ota_status_json(char *buf, size_t cap)
                      v, b, d, s_part ? ST_NAME[s_state] : "nopart");
     if (n < 0) return 0;
     if ((size_t)n < cap) {
-        if (s_stage.magic[0]) {
-            dap_json_escape(s, sizeof(s), s_stage.ver);
-            n += snprintf(buf + n, cap - n, "{\"job\":%lu,\"ver\":\"%s\"}", (unsigned long)s_stage.job, s);
-        } else {
-            n += snprintf(buf + n, cap - n, "null");
-        }
+        int k = status_tail(buf + n, cap - n, false);
+        n += k < 0 ? 0 : k;
     }
     return (size_t)n < cap ? (size_t)n : cap - 1;
 }
@@ -928,7 +1138,7 @@ size_t dsp_ota_status_json(char *buf, size_t cap)
 // stat json 의 "dsp" 객체 — dsp_ota_status_json 과 같은 값을 중첩 형식으로
 size_t dsp_ota_format_json(char *buf, size_t cap)
 {
-    char v[72], b[72], d[72], s[100];
+    char v[72], b[72], d[72];
     dap_json_escape(v, sizeof(v), s_dsp_ver);
     dap_json_escape(b, sizeof(b), s_dsp_boot);
     dap_json_escape(d, sizeof(d), s_dsp_build);
@@ -937,21 +1147,37 @@ size_t dsp_ota_format_json(char *buf, size_t cap)
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }
-    if (s_stage.magic[0]) {
-        dap_json_escape(s, sizeof(s), s_stage.ver);
-        n += snprintf(buf + n, cap - n, "{\"job\":%lu,\"ver\":\"%s\"}}", (unsigned long)s_stage.job, s);
-    } else {
-        n += snprintf(buf + n, cap - n, "null}");
+    int k = status_tail(buf + n, cap - n, true);
+    if (k < 0 || (size_t)(n + k) >= cap) {
+        return 0;
     }
+    n += k;
+    n += snprintf(buf + n, cap - n, "}");
     return (size_t)n < cap ? (size_t)n : 0;
 }
 
 size_t dsp_ota_format(char *buf, size_t cap)
 {
-    int n = snprintf(buf, cap, "dsp : app=%s boot=%s build=%s state=%s staged=%s(job %lu) pan=%c\n",
+    pkg_view_t pv;
+    char pk[64];
+    pkg_view(&pv);
+    if (!pv.ok) {
+        strlcpy(pk, "nopart", sizeof(pk));
+    } else if (pv.cur_id[0]) {
+        snprintf(pk, sizeof(pk), "%s(%s)", pv.cur_id, pv.cur_ver);
+    } else {
+        strlcpy(pk, "-", sizeof(pk));
+    }
+    int n = snprintf(buf, cap, "dsp : app=%s boot=%s build=%s state=%s staged=%s(job %lu) pan=%c pkg=%s staged_pkg=%s\n",
                      s_dsp_ver, s_dsp_boot, s_dsp_build, s_part ? ST_NAME[s_state] : "nopart (USB reflash needed)",
-                     s_stage.magic[0] ? s_stage.ver : "-", (unsigned long)s_stage.job, s_pan);
+                     s_stage.magic[0] ? s_stage.ver : "-", (unsigned long)s_stage.job, s_pan, pk,
+                     pv.staged_id[0] ? pv.staged_id : "-");
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
+}
+
+size_t dsp_ota_pkg_format(char *buf, size_t cap)
+{
+    return dsp_pkg_format(buf, cap, s_stage.magic[0] ? s_stage.file_crc : 0);
 }
 
 esp_err_t dsp_ota_init(void)
@@ -964,6 +1190,7 @@ esp_err_t dsp_ota_init(void)
     if (!s_part) {
         ESP_LOGE(TAG, "partition '%s' not found - mainboard OTA disabled until this bridge is reflashed over USB with the new partition table", PART_LABEL);
     }
+    dsp_pkg_init();                     // 짝 패키지 보관 (없으면 pkg_nopart — 스테이징·적용 거부)
     s_q = q;
     if (s_part && stage_load()) {
         s_state = ST_STAGED;

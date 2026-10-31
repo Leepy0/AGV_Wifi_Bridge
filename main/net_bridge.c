@@ -442,7 +442,7 @@ static void net_rx_task(void *arg)
 // 주기 상태 보고 (서버에서 RSSI/로밍/오류 추이 기록용)
 static void hb_task(void *arg)
 {
-    char js[768];
+    static char js[BR_PAYLOAD_MAX];     // hb 태스크 전용 (0.9.0: 패키지 필드 추가 — 최대 ~590 B, 스택 절약)
     const char *fw   = esp_app_get_description()->version;
     const char *part = ota_running_partition();
     uint8_t mac[6] = {0};

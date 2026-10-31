@@ -30,6 +30,7 @@ size_t net_test(const char *host, char *buf, size_t cap) {
     return (size_t)snprintf(buf, cap, "ping x: 3/3 ok, avg 4 ms\n");
 }
 size_t dsp_ota_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
+size_t dsp_ota_pkg_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
 void dsp_ota_query_version(void) {}
 void dsp_ota_apply(const char *json, size_t len) {}
 size_t cfg_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
