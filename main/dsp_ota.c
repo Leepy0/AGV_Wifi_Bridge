@@ -972,7 +972,7 @@ static const char *parse_pkg(const char *json, size_t len, cmd_t *c)
         !lower_hex(sha, 64) || !lower_hex(c->pkg_id, 16) || (ru == DAP_JSON_OK && strncmp(c->pkg_url, "http", 4) != 0)) {
         return "no_pkg";
     }
-    if (s_q && !dsp_pkg_ready()) {          // 초기화 전이면 아래 큐 단계에서 not_ready
+    if (s_q && s_part && !dsp_pkg_ready()) {    // 초기화 전은 not_ready, dspfw 도 없으면 no_partition (dsp 태스크) 이 먼저
         return "pkg_nopart";
     }
     if (c->pkg_size > DSP_PKG_MAX) {

@@ -340,6 +340,7 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 
 - flags (처음 0xFFFFFFFF): bit0=0 기록 완료 / bit1=0 적용됨 / bit2=0 지난 것. 해석: magic 불일치 또는 bit0=1 → 빈 슬롯, bit1=1 → **STAGED**, bit2=1 → **APPLIED**, 그 외 **OLD**. 두 슬롯이 모두 APPLIED(OLD 표시 전 전원 차단)면 seq 큰 쪽이 현재.
 - 새 패키지를 쓸 슬롯: 현재 APPLIED 가 아닌 슬롯 (둘 다 아니면 빈 슬롯, 없으면 seq 작은 쪽). 머리 섹터부터 4KB 씩 지우며 기록, 쓴 바이트를 flash 에서 다시 읽어 sha256 을 스트리밍 계산. 머리는 flags=0xFFFFFFFF 로 쓴 뒤 마지막에 flags 워드만 bit0 → 0.
+- APPLIED 슬롯(메인보드에서 도는 프로그램의 원본)은 덮어쓰지 않는다. 그래서 APPLIED + STAGED 일 때 새 START 는 STAGED 슬롯을 다시 쓰고, 그 START 가 실패하면 이전 스테이징은 짝 패키지가 없어 적용이 `no_pkg` 가 된다 — 새 작업으로 다시 배포한다.
 - 시간 (어림): 지우기 4KB 당 수십 ms (6MB = 1,536 섹터 → 1분 안팎, 섹터마다 1 tick 양보), 적용 전 sha256 재계산은 6MB 에 1초 안팎(64KB 마다 양보). 받는 동안 UART 중계는 계속된다.
 
 | 단계 | 동작 |
