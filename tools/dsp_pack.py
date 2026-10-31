@@ -258,6 +258,7 @@ PKG_NAME_RE       = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,59}")
 STAGE_HDR_LEN     = 64                                  # 브리지 dsp_ota.c STAGE_HDR_LEN
 STAGE_PART_SIZE   = 0x60000                             # partitions.csv 의 dspfw 크기
 DSPFW_MAX         = STAGE_PART_SIZE - STAGE_HDR_LEN     # 393,152 B
+BRIDGE_PKG_MAX    = 0x600000 - 0x1000                   # 브리지 0.9.0 dsppkg 슬롯 한도 6,287,360 B (main/dsp_pkg.h DSP_PKG_MAX)
 # 압축 해제 기준 한도 (zip bomb 방지) — 실제로 읽으면서 센다
 PKG_LIMITS        = {"manifest": 64 * 1024, "dspfw": DSPFW_MAX, "out": 64 << 20, "map": 16 << 20}
 PKG_KIND_LABEL    = {"manifest": "manifest.json", "dspfw": ".dspfw", "out": ".out", "map": ".map"}
@@ -525,6 +526,8 @@ def bundle(out_path: str, map_path: str, ver: str, output=None, hex2000=None, bu
         f.write(pkg)
     res["path"] = output
     res["pkg_size"] = len(pkg)
+    if len(pkg) > BRIDGE_PKG_MAX:
+        res["warnings"].append(f"패키지({len(pkg)} B)가 브리지 보관 한도({BRIDGE_PKG_MAX} B)를 넘음 — 브리지·USB 스테이징이 pkg_too_big 으로 거부함")
     return res
 
 

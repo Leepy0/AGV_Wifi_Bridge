@@ -140,7 +140,7 @@ def main():
     assert c_define(hsrc, "DSP_PKG_LABEL").strip('"') == us.DSPPKG_LABEL == "dsppkg"
     assert int(c_define(hsrc, "DSP_PKG_SLOT_SIZE").rstrip("u"), 0) == us.PKG_SLOT_SIZE == 0x600000
     assert int(c_define(hsrc, "DSP_PKG_HDR_SECTOR").rstrip("u"), 0) == us.PKG_HDR_SECTOR == 0x1000
-    assert int(c_define(hsrc, "DSP_PKG_SLOTS")) == us.PKG_SLOTS == 2 and us.PKG_MAX == 6287360
+    assert int(c_define(hsrc, "DSP_PKG_SLOTS")) == us.PKG_SLOTS == 2 and us.PKG_MAX == 6287360 == dp.BRIDGE_PKG_MAX
     prow = next(r for r in rows if r[0] == "dsppkg")
     assert (prow[1], int(prow[2], 0), int(prow[3], 0), int(prow[4], 0)) == ("data", us.DSPPKG_SUBTYPE, us.DSPPKG_DEFAULT_OFFSET,
                                                                            us.DSPPKG_DEFAULT_SIZE) == ("data", 0x41, 0x400000, 0xC00000), prow

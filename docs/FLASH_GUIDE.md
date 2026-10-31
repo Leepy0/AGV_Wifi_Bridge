@@ -3,10 +3,11 @@
 브리지를 처음 굽고, 호기 설정을 하고, 게이트웨이 서버에 붙이는 절차입니다.
 메인보드 OTA 를 쓸 호기는 메인보드 첫 설치(8장)까지 합니다.
 
-- 기준 버전: 브리지 **v0.8.0** (ESP-IDF v6.1) · 게이트웨이 서버 **AGV FOTA Gateway v0.4.0**
+- 기준 버전: 브리지 **v0.9.0** (ESP-IDF v6.1, **ESP32-S3 N16 = 플래시 16MB 전용**) · 게이트웨이 서버 **AGV FOTA Gateway v0.4.0** (메인보드 OTA 는 **v0.7.0 이상**)
 - 독자: 처음 설치하는 현장 엔지니어 · 운용자
 - 빌드 zip 안에도 이 문서와 그림(`images/`)이 들어 있습니다.
 - 이미 0.5.1 을 쓰는 호기는 [7-4](#7-4-051-에서-052-로-올릴-때) 를 먼저 봅니다.
+- 0.5.x~0.8.x 를 쓰는 호기는 [3-4](#3-4-05008x--090-패키지-보관-파티션-추가-16mb) 를 먼저 봅니다 (파티션 표 + 앱만 다시 구우면 설정 유지).
 
 ## 목차
 
@@ -18,7 +19,7 @@
 5. [호기 설정](#5-호기-설정)
 6. [게이트웨이 연결 확인](#6-게이트웨이-연결-확인)
 7. [이후 업데이트 (게이트웨이 배포 작업)](#7-이후-업데이트-게이트웨이-배포-작업)
-8. [메인보드 첫 설치 (메인보드 OTA 를 쓸 호기만)](#8-메인보드-첫-설치-메인보드-ota-를-쓸-호기만)
+8. [메인보드 첫 설치 (메인보드 OTA 를 쓸 호기만)](#8-메인보드-첫-설치-메인보드-ota-를-쓸-호기만) · [8-6 원본 꺼내기](#8-6-원본-꺼내기-dsp_pkg_readpy)
 9. [문제 해결](#9-문제-해결)
 10. [부록](#10-부록)
 
@@ -50,7 +51,7 @@
 | 준비물 | 내용 |
 |---|---|
 | 빌드 zip | `agv_wifi_bridge_<버전>.zip`. GitHub **Releases**(`v0.5.2` 등) 또는 **Actions** 실행 결과의 Artifacts 에서 받습니다 |
-| 보드 | ESP32-S3 DevKitC-1, **플래시 4MB 이상** (파티션이 4MB 를 모두 씁니다) |
+| 보드 | ESP32-S3 **N16** (DevKitC-1-N16R8 등), **플래시 16MB**. 0.9.0 부터 4MB·8MB 보드는 지원하지 않습니다 (메인보드 패키지 보관 12MB 포함, 파티션이 16MB 를 모두 씁니다). 보드 칩 표기 `N16` 또는 `esptool flash_id` 의 `Detected flash size: 16MB` 로 확인 |
 | USB 케이블 | **데이터 전송이 되는** 케이블. 충전 전용 케이블은 포트가 안 보입니다 |
 | esptool | Windows: Arduino IDE 에 ESP32 보드가 설치돼 있으면 `flash.bat` 이 내장 `esptool.exe` 를 찾습니다. 그 외: `pip install esptool`. 3장의 직접 명령은 `esptool` 이 PATH 에 있어야 합니다. 없으면 `esptool` 대신 `python -m esptool` 로 씁니다 |
 | 휴대폰 | BLE 터미널 앱 ([5-1](#5-1-휴대폰-ble-현장-권장)) |
@@ -78,7 +79,7 @@ zip 내용:
 | `ota_data_initial.bin` | 부팅 슬롯 초기화 | 0xf000 |
 | `flash_args` | 개별 파일 4개의 주소 목록 (`write_flash @flash_args`) | |
 | `flash.bat` / `flash.sh` | 전체 이미지 굽기 스크립트 (Windows / Linux · macOS) | |
-| `dsp_pack.py` · `dsp_usb_stage.py` | 메인보드 프로그램 패키지(`.dsppkg`) 만들기 · 검증 / 패키지를 USB 로 브리지에 넣기 ([8-5](#8-5-검수용-usb-로-메인보드-프로그램-넣기-협력사-신규-agv)). 같은 폴더에 둬야 함 | |
+| `dsp_pack.py` · `dsp_usb_stage.py` · `dsp_pkg_read.py` | 메인보드 프로그램 패키지(`.dsppkg`) 만들기 · 검증 / 패키지를 USB 로 브리지에 넣기 ([8-5](#8-5-검수용-usb-로-메인보드-프로그램-넣기-협력사-신규-agv)) / 브리지에 보관된 패키지 꺼내기 ([8-6](#8-6-원본-꺼내기-dsp_pkg_readpy)). 같은 폴더에 둬야 함 | |
 | `FLASH_GUIDE.md` · `images/` · `README.txt` | 이 문서 · 그림 · 요약 | |
 
 버전 표기:
@@ -116,10 +117,10 @@ DevKitC-1 에는 USB 포트가 두 개 있습니다. **"UART" 라고 적힌 쪽*
 
 | 방법 | 쓰는 경우 | 파티션 표 | 호기 설정 (nvs) | 절 |
 |---|---|---|---|---|
-| 전체 이미지 | 새 보드. 0.5.0 미만(또는 `nopart`)에서 올리며 다시 설정할 때 | 새로 씀 | **지워짐** | [3-1](#3-1-전체-이미지-새-보드) |
-| 개별 파일 4개 | 0.5.0 미만(또는 `nopart`)에서 올리며 설정을 살릴 때 | 새로 씀 | 유지 | [3-2](#3-2-050-미만--05x-파티션-변경) |
-| 앱만 | 이미 0.5.x 파티션인 보드를 USB 로 다시 구울 때 | 그대로 | 유지 | [3-3](#3-3-설정을-살려서-다시-굽기-05x-보드) |
-| 굽지 않음 | 0.5.x 파티션이고 게이트웨이에 붙어 있음 | — | 유지 | [7장](#7-이후-업데이트-게이트웨이-배포-작업) |
+| 전체 이미지 | 새 보드. 0.9.0 미만(또는 `nopart`)에서 올리며 다시 설정할 때 | 새로 씀 | **지워짐** | [3-1](#3-1-전체-이미지-새-보드) |
+| 개별 파일 4개 | 0.9.0 미만(또는 `nopart` · `pkg_st=nopart`)에서 올리며 설정을 살릴 때 | 새로 씀 | 유지 | [3-2](#3-2-050-미만--05x-파티션-변경) · [3-4](#3-4-05008x--090-패키지-보관-파티션-추가-16mb) |
+| 앱만 | 이미 0.9.0 파티션인 보드를 USB 로 다시 구울 때 | 그대로 | 유지 | [3-3](#3-3-설정을-살려서-다시-굽기-05x-보드) |
+| 굽지 않음 | 0.9.0 파티션이고 게이트웨이에 붙어 있음 | — | 유지 | [7장](#7-이후-업데이트-게이트웨이-배포-작업) |
 
 시작 전에 시리얼 모니터(Arduino IDE, PuTTY 등)를 **닫습니다**. 포트를 잡고 있으면 굽기가 실패합니다.
 
@@ -227,8 +228,35 @@ esptool --chip esp32s3 -p COM5 -b 921600 write_flash @flash_args
 esptool --chip esp32s3 -p COM5 -b 921600 write_flash 0xf000 ota_data_initial.bin 0x20000 agv_wifi_bridge.bin
 ```
 
-- 파티션 표를 쓰지 않으므로 **0.5.0 미만 보드에는 쓰지 않습니다**. `nopart` 상태가 그대로 남습니다.
+- 파티션 표를 쓰지 않으므로 **0.9.0 미만 파티션 보드에는 쓰지 않습니다**. `nopart`·`pkg_st=nopart` 상태가 그대로 남습니다.
 - 부팅 슬롯이 `ota_0` 으로 돌아갑니다.
+
+### 3-4. 0.5.0~0.8.x → 0.9.0 (패키지 보관 파티션 추가, 16MB)
+
+0.9.0 은 메인보드에 굽는 프로그램의 패키지(`.dsppkg` = `.dspfw` + `.out` + `.map`)를 브리지에 보관하는 `dsppkg` 파티션을 **뒤에 덧붙입니다**. 기존 항목(`nvs` · `otadata` · `ota_0/1` · `dspfw`)의 위치 · 크기는 그대로입니다.
+
+| 파티션 | 0.5.x ~ 0.8.x (4MB) | 0.9.0 (16MB) |
+|---|---|---|
+| `nvs` · `otadata` · `phy_init` · `ota_0` · `ota_1` · `dspfw` | [10-1](#10-1-플래시-배치-partitionscsv) 과 같음 | 같음 |
+| `dsppkg` | 없음 | **0x400000, 12MB (0xC00000)** — 슬롯 2개 × 6MB |
+
+- 보드가 **16MB(N16)** 여야 합니다. 4MB 보드는 이 버전을 굽지 않습니다(보드 교체).
+- 3-2 의 **B. 개별 파일 4개** 명령으로 굽습니다. 파티션 표 + 앱만 바뀌므로 **호기 설정(nvs)과 받아 둔 스테이징이 유지**됩니다. A(전체 이미지)는 설정이 지워집니다.
+- 굽고 나서 `dsp` 줄 끝이 `pkg=- staged_pkg=-`(`pkg=nopart` 가 아님)이고, `dsp pkg` 가 `pkg slot0: empty` · `pkg slot1: empty` 를 보이면 됩니다.
+- 받아 둔 스테이징(0.8.x 가 받은 것)은 짝 패키지가 없어 적용이 `no_pkg` 로 거부됩니다. 0.7.0 게이트웨이에서 새 작업으로 다시 배포합니다.
+
+#### 이전 파티션 표인 채 OTA 로 0.9.0 을 받은 경우
+
+앱은 올라가고 브리지 중계 · 설정 · 브리지 OTA 는 정상입니다. **메인보드 스테이징 · 적용만 안 됩니다** (짝 패키지를 보관할 곳이 없음).
+
+| 어디서 | 보이는 것 |
+|---|---|
+| 부팅 로그 | `E (...) dsp_pkg: partition 'dsppkg' not found - mainboard staging/apply refused (pkg_nopart) until this bridge is reflashed over USB with the 0.9.0 partition table (16MB)` |
+| 콘솔 `stat` · `dsp` | `dsp : ... pkg=nopart staged_pkg=-` / `dsp pkg` → `pkg : nopart - ...` |
+| heartbeat · INFO | `"pkg_st":"nopart","dsp_pkg":null` (`dsp_st` 는 그대로 `idle` 등) |
+| 메인보드 배포 작업 · `dsp apply` | `pkg_nopart` 로 거부 (메인보드 그대로) |
+
+조치: 16MB 보드면 3-2 의 B 로 USB 굽기(설정 유지). 4MB 보드면 0.8.x 로 되돌리거나 보드를 바꿉니다.
 
 ### 연결이 안 될 때 (`Failed to connect to ESP32-S3`)
 
@@ -726,6 +754,12 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 | `ver_mismatch` | 앱이 보고한 버전이 이미지 버전과 다름 (정확히 비교) | 앱이 보고하는 버전 값 확인 |
 | `not_staged` · `job_mismatch` | 브리지의 스테이징이 사라졌거나 다른 작업 것 | 새 작업으로 다시 배포 |
 | `no_partition` | 브리지에 `dspfw` 가 없음 | [3-2](#3-2-050-미만--05x-파티션-변경) |
+| `no_pkg` | 받기: 게이트웨이가 짝 패키지(`pkg_*`)를 보내지 않음(0.6.x). 적용: 스테이징한 이미지의 짝 패키지가 브리지에 없거나 손상됨 (0.8.x 가 받아 둔 이미지, USB 로 `.dspfw` 만 넣은 경우 등). 메인보드는 건드리지 않음 | 게이트웨이 0.7.0 이상에서 **새 작업**으로 다시 배포. 검수용이면 `dsp_usb_stage.py` 로 다시 넣기 |
+| `pkg_nopart` | 브리지에 `dsppkg` 파티션이 없음 (0.9.0 이전 파티션 표) | [3-4](#3-4-05008x--090-패키지-보관-파티션-추가-16mb) |
+| `pkg_too_big` | 패키지가 6,287,360 B 를 넘음 | `.map`·`.out` 크기 확인 (디버그 정보는 그대로 두고 불필요한 산출물이 묶이지 않았는지) |
+| `pkg_sha` · `pkg_size` | 받은 패키지의 해시 · 크기가 게이트웨이가 알려 준 값과 다름 (전송 손상) | 새 작업으로 다시. 계속되면 게이트웨이 PC · 네트워크 확인 |
+| `pkg_url_host` · `pkg_url_too_long` · `pkg_http_*` | 패키지 URL 호스트가 `server` IP 아님 / 199자 초과 / 받기 실패 | `url_host` · `url_too_long` · `http_*` 와 같은 조치 |
+| `pkg_flash` | 브리지 `dsppkg` 플래시 쓰기 오류 | 새 작업으로 다시. 반복되면 브리지 보드 교체 |
 
 - 작업 로그의 `wait_power`(메인보드 전원을 껐다 켜세요)와 `retry`(굽기 재시도 n회째)는 오류가 아니라 진행 표시입니다.
 - 실패한 작업은 **새 작업**으로 다시 합니다. 브리지는 같은 작업 번호의 적용 명령에 10분 동안 마지막 결과만 다시 보고합니다.
@@ -742,31 +776,46 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 
 ### 8-5. 검수용: USB 로 메인보드 프로그램 넣기 (협력사 신규 AGV)
 
-협력사가 만든 신규 AGV 는 액추에이터를 실제 현장 프로그램으로 시험해야 합니다. 게이트웨이 없이 검수 PC 에서 브리지의 `dspfw` 파티션에 패키지를 직접 넣고(스테이징), 브리지 콘솔 · BLE 의 `dsp apply` 로 메인보드에 적용합니다.
+협력사가 만든 신규 AGV 는 액추에이터를 실제 현장 프로그램으로 시험해야 합니다. 게이트웨이 없이 검수 PC 에서 브리지에 패키지를 직접 넣고, 브리지 콘솔 · BLE 의 `dsp apply` 로 메인보드에 적용합니다. 도구는 `.dspfw` 를 `dspfw` 파티션에 스테이징하고, **패키지 통째를 `dsppkg` 보관 슬롯에도 씁니다**(0.9.0 — 짝 패키지가 없으면 브리지가 적용을 거부).
 
 | 조건 | 내용 |
 |---|---|
 | 패키지 | `.dsppkg` 만 받습니다. 맨 `.dspfw` 는 거부하고, 쓰기 전에 패키지를 전부 검증합니다(해시 · `.dspfw` 구조 · `.map` ↔ `.out` 연결). 실패하면 아무것도 쓰지 않습니다 |
 | 메인보드 | 상주 부트로더(`1.1.0`)가 JTAG 으로 **먼저** 구워져 있어야 합니다([8-2](#8-2-순서) ①). 앱은 없어도 됩니다 |
 | AGV | 정지 상태. 적용 중 약 20~30초 메인보드 앱이 멈춥니다 |
+| 브리지 | 0.9.0 파티션 표(16MB, `dsppkg` 있음). 없으면 중단하고 다시 굽기를 안내합니다 |
 | 도구 | zip 안의 `dsp_usb_stage.py` · `dsp_pack.py`(같은 폴더), `pip install esptool` |
 
 1. 브리지를 USB 로 연결하고 포트를 확인합니다([2장](#2-usb-연결--포트-확인)).
-2. 패키지를 넣습니다. 보드의 파티션 표를 읽어 `dspfw` 파티션만 쓰므로 **호기 설정은 그대로**입니다.
+2. 패키지를 넣습니다. 보드의 파티션 표와 보관 슬롯 머리(4KB × 2)를 읽어 빈 슬롯(지금 메인보드에서 도는 패키지가 있으면 그 반대쪽)을 고르고, `dspfw` · `dsppkg` 파티션만 한 번에 쓰므로 **호기 설정은 그대로**입니다. 패키지 크기만큼 쓰므로 수 MB 패키지는 수십 초 걸립니다.
    ```bash
    python dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg
    ```
-   보드가 0.5.0 이전 파티션 배치라 `dspfw` 가 없으면 중단하고 `--bridge` 를 안내합니다. 이때만 전체 이미지와 함께 한 번에 굽습니다 — **저장된 호기 설정이 지워지니** 끝나고 [5장](#5-호기-설정)대로 다시 설정합니다.
+   보드가 0.9.0 이전 파티션 배치라 `dspfw` 나 `dsppkg` 가 없으면 중단합니다. 설정을 지키려면 [3-4](#3-4-05008x--090-패키지-보관-파티션-추가-16mb)(4개 파일)로 먼저 구운 뒤 다시 실행합니다. 또는 전체 이미지와 함께 한 번에 굽습니다 — **저장된 호기 설정이 지워지니** 끝나고 [5장](#5-호기-설정)대로 다시 설정합니다.
    ```bash
    python dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg --bridge agv_wifi_bridge_merged.bin
    ```
-3. 브리지가 재부팅하면 콘솔(115200) 또는 BLE 터미널에서 `dsp` 를 입력해 `staged=1.2.3(job 0)` 인지 봅니다. job 0 은 작업 번호 없음이라는 뜻입니다.
-4. AGV 를 세운 상태에서 `dsp apply`. 앱에 진입을 요청한 뒤 부트로더로 지우기 · 쓰기 · 검증 · 리셋을 합니다.
-5. 다시 `dsp` 로 `app=1.2.3 boot=1.1.0` 인지 확인합니다.
+3. 브리지가 재부팅하면 콘솔(115200) 또는 BLE 터미널에서 `dsp` 를 입력해 `staged=1.2.3(job 0) … staged_pkg=<패키지 ID>` 인지 봅니다. job 0 은 작업 번호 없음이라는 뜻입니다. `dsp pkg` 로 보관 슬롯을 볼 수 있습니다.
+4. AGV 를 세운 상태에서 `dsp apply`. 짝 패키지를 확인한 뒤 앱에 진입을 요청하고 부트로더로 지우기 · 쓰기 · 검증 · 리셋을 합니다.
+5. 다시 `dsp` 로 `app=1.2.3 boot=1.1.0 … pkg=<패키지 ID>(1.2.3)` 인지 확인합니다.
 
 - 옵션: `--baud 921600`(기본), `--esptool "python -m esptool"`(기본은 자동 탐색: 설치된 esptool 모듈 → Arduino IDE 내장 `esptool.exe` → PATH).
 - 포트가 사용 중이면 시리얼 모니터를 닫고, 자동 리셋이 안 되는 보드는 BOOT 를 누른 채 RESET 을 눌렀다 놓고 다시 실행합니다([연결이 안 될 때](#연결이-안-될-때-failed-to-connect-to-esp32-s3)).
-- 패키지 ID(앞 16자)는 스테이징 머리의 예약 칸에 기록됩니다(브리지는 읽지 않음). 형식은 [DSP_OTA_DESIGN.md](DSP_OTA_DESIGN.md) 3-1절.
+- 패키지 ID(앞 16자)는 스테이징 머리의 예약 칸과 보관 슬롯 머리에 기록됩니다. 형식은 [DSP_OTA_DESIGN.md](DSP_OTA_DESIGN.md) 3-1절 · 6절.
+
+### 8-6. 원본 꺼내기 (`dsp_pkg_read.py`)
+
+0.9.0 브리지는 메인보드에 구운 프로그램의 패키지(`.dspfw` + `.out` + `.map`)를 보관합니다. 소스나 PC 를 잃어도 **AGV 에서 브리지를 떼어** 그 AGV 메인보드에서 도는 프로그램의 원본을 꺼낼 수 있습니다. 보드는 읽기만 합니다.
+
+```bash
+python dsp_pkg_read.py COM5                              # 적용된(APPLIED) 패키지, 없으면 스테이징(STAGED) 패키지
+python dsp_pkg_read.py COM5 -o AGV07.dsppkg --slot 0     # 슬롯 고르기: applied | staged | 0 | 1 (OLD 도 0/1 로)
+python dsp_pack.py info AGV07.dsppkg                     # 내용 확인 (.out · .map · 링크 시각)
+```
+
+- 두 슬롯 상태를 먼저 출력하고, 고른 슬롯의 크기 · sha256 을 슬롯 머리와 대조한 뒤 패키지를 전부 검증해 씁니다. 손상되었으면 파일을 쓰지 않습니다.
+- 기본 출력 이름: `<.out 이름>_<ver>_<패키지 ID 앞 8자>.dsppkg` (현재 폴더). 패키지를 풀면(zip) `.out` · `.map` 이 나옵니다.
+- 6MB 패키지는 921600 bps 에서 1~2분 걸립니다. 브리지 전원은 USB 로 충분합니다.
 
 ---
 
@@ -780,7 +829,7 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 | `Failed to connect` | 시리얼 모니터 닫기 → BOOT 누른 채 RESET → 속도 낮추기 |
 | `esptool not found` | `pip install esptool`, 또는 Arduino IDE 에 ESP32 보드 설치 |
 | 콘솔에 아무것도 안 나옴 | "UART" 포트인지, 115200 인지, RESET 눌러 보기 |
-| 계속 재부팅 (`rst:0x...` 반복) | USB 전원 부족(허브 대신 PC 직결), 플래시 4MB 미만 보드 |
+| 계속 재부팅 (`rst:0x...` 반복) | USB 전원 부족(허브 대신 PC 직결), 플래시 16MB 미만 보드 (0.9.0 은 N16 전용) |
 | `busy: mainboard programming - reboot refused, retry when done` | 메인보드를 굽는 중. 끝난 뒤 다시 `reboot` |
 | `set hb_ms …` 에 `invalid key or value` | `hb_ms` 는 0 또는 100~2000 만 받음 |
 
@@ -856,8 +905,9 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 | `ota_0` | app / ota_0 | 0x20000 | 0x1C0000 (1.75MB) | 앱 슬롯 0 |
 | `ota_1` | app / ota_1 | 0x1E0000 | 0x1C0000 (1.75MB) | 앱 슬롯 1 |
 | `dspfw` | data / 0x40 | 0x3A0000 | 0x60000 (384KB) | 메인보드 `.dspfw` 스테이징 |
+| `dsppkg` | data / 0x41 | 0x400000 | 0xC00000 (12MB) | 메인보드 패키지 보관 슬롯 2개 (각 6MB, 0.9.0~) |
 
-- 끝 주소는 0x400000 (4MB) 입니다.
+- 끝 주소는 0x1000000 (16MB) 입니다.
 - 앱(`agv_wifi_bridge.bin`)은 슬롯 크기 1,835,008 B 를 넘으면 안 됩니다. Actions 실행 요약에 사용률이 나옵니다.
 
 ### 10-2. 명령 요약
@@ -871,7 +921,8 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 | `defaults` | ○ | ○ | × | 저장된 설정 삭제 → 재부팅 시 빌드 기본값 |
 | `stat` | ○ | ○ | ○ | Wi-Fi · 송수신 카운터 · 설정 모드 · 메인보드 상태 |
 | `setup` · `setup on` · `setup off` | ○ | ○ | ○ | 설정 모드 상태 / 열기 / 닫기 |
-| `dsp` · `dsp ver` · `dsp apply` | ○ | ○ | ○ | 메인보드 상태 / 버전 다시 조회 (응답 없으면 `?`) / 스테이징된 이미지 적용 (작업 번호 검사 없음) |
+| `dsp` · `dsp ver` · `dsp apply` | ○ | ○ | ○ | 메인보드 상태 / 버전 다시 조회 (응답 없으면 `?`) / 스테이징된 이미지 적용 (작업 번호 검사 없음, 짝 패키지 필요) |
+| `dsp pkg` | ○ | ○ | ○ | 보관 패키지 슬롯 2개: STAGED / APPLIED / OLD / empty, id, ver, size, seq, job (읽기 전용) |
 | `mon 0` · `mon 1` | ○ | × | × | 모든 프레임 hex 덤프 (벤치) |
 | `ota` · `ota <url>` · `ota confirm` | ○ | × | × | 펌웨어 상태 / 수동 OTA (호스트 = `server` IP) / 롤백 대기 수동 확정 |
 | `login <비밀번호>` | — | ○ | — | BLE 연결마다 먼저. 같은 연결에서 5번 연속 틀리면 끊김 |
@@ -884,6 +935,8 @@ python tools/dsp_flash.py COM5 AGV_Main_1.2.3.dsppkg     # 맨 .dspfw 도 됩니
 | `ota` = `valid` / `pending` / `busy` | `ota`, `stat`, heartbeat | 확정됨 / OTA 뒤 서버 패킷 대기 (180초 안에 없으면 롤백) / 받는 중 |
 | `cfg` = `saved` / `default` / `trial` | `cfg`, `stat`, heartbeat | 저장된 설정 / 빌드 기본값 / 원격 설정 확인 대기 |
 | `dsp_st` = `idle` / `downloading` / `staged` / `programming` / `nopart` | `dsp`, heartbeat | 메인보드 이미지: 없음 / 받는 중 / 받아 둠 / 굽는 중 / 파티션 없음 |
+| `pkg_st` = `ok` / `nopart` | heartbeat, INFO (`dsp` 줄은 `pkg=nopart`) | `dsppkg` 파티션 있음 / 없음 (0.9.0 이전 표 → [3-4](#3-4-05008x--090-패키지-보관-파티션-추가-16mb)) |
+| `dsp_pkg` = `{id, ver}` / `null` | heartbeat, INFO (`dsp` 줄은 `pkg=<id>(<ver>)`) | 메인보드에 적용된 패키지 / 없음. `staged.pkg` = 스테이징 이미지의 짝 패키지 ID |
 | `setup` = `1` / `0` | heartbeat | 설정 모드 켜짐 / 꺼짐 |
 | `mac` | heartbeat, INFO | 브리지 Wi-Fi MAC (`xx:xx:xx:xx:xx:xx`). 0.5.2 부터 heartbeat 에도 있음 |
 

@@ -8,7 +8,8 @@ dsp/common/   dsp_image.[ch]   이미지 헤더·CRC (부트로더·브리지·�
 dsp/boot/     부트로더 (플래시 섹터 A)
 dsp/app/      메인보드 앱에 추가하는 파일 + 링커 cmd 예시
 tools/dsp_pack.py   CCS 빌드 결과(.out/.map) → 배포 패키지(.dsppkg = .dspfw + .out + .map)
-tools/dsp_usb_stage.py   패키지를 USB 로 브리지에 직접 스테이징 (검수용)
+tools/dsp_usb_stage.py   패키지를 USB 로 브리지에 직접 스테이징 + 보관 (검수용)
+tools/dsp_pkg_read.py    브리지에 보관된 패키지를 USB 로 꺼내기 (원본 복구용, 브리지 0.9.0~)
 tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
 ```
 
@@ -78,6 +79,7 @@ tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
    python <path>/dsp_pack.py bundle "${ProjName}.out" --map "${ProjName}.map" --ver 1.2.3 --hex2000 "${CG_TOOL_ROOT}/bin/hex2000"
    ```
    - 패키지는 `.dspfw` + **`.out` + `.map`** + manifest 를 한 파일로 묶는다. `.out`/`.map` 은 필수다 — 원본 소스를 잃어도 `.out`(DWARF)·`.map` 으로 복구할 수 있게 하는 재발 방지책이다. 게이트웨이와 `dsp_usb_stage.py` 는 패키지만 받는다.
+   - 브리지 0.9.0 은 메인보드에 굽는 프로그램의 패키지를 브리지 flash(`dsppkg`, 최대 6,287,360 B)에도 보관한다. 소스·PC 를 잃어도 AGV 에서 브리지를 떼어 `python tools/dsp_pkg_read.py COM5` 로 그 AGV 에서 도는 프로그램의 `.out`/`.map` 을 꺼낼 수 있다.
    - **Release 빌드도 디버그 정보(`-g`)를 켜 둔다.** DWARF 는 `.out` 에만 남고 플래시(`.dspfw`)에는 들어가지 않아 비용이 없다.
    - `bundle` 은 `.out` 에서 hex2000 을 직접 돌려 `.dspfw` 를 만든다(`--memwidth=16 --romwidth=16`, 바이트 주소 HEX 는 패커가 거부). HEX 를 따로 받는 옵션은 없다 — `.dspfw` 가 그 `.out` 에서 나왔음을 보장하기 위해서다. 출력은 `.out` 옆의 `<이름>_<ver>.dsppkg`.
    - `.map` 이 같은 빌드의 것인지 링크 시각(없으면 출력 파일 이름)으로 확인한다. 실기 `.out`/`.map` 으로 아직 검증하지 못해 막히면 `--no-link-check` (패키지에 `link_check: skipped` 로 기록되고 경고). 패키지 형식: [DSP_OTA_DESIGN.md](../docs/DSP_OTA_DESIGN.md) 3-1절.

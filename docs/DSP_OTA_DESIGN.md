@@ -1,7 +1,7 @@
 # 메인보드(TMS320F2808) OTA 설계 — B안: 상주 부트로더
 
-> 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`, USB 스테이징 `tools/dsp_usb_stage.py`). 실기 검증 전.
-> 기준: 브리지 **v0.5.2** · 게이트웨이 **v0.3.0**. 시간·코드 값은 `main/dsp_ota.c`, `dsp/boot/boot_cfg.h` 기준.
+> 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`·`main/dsp_pkg.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`, USB 스테이징 `tools/dsp_usb_stage.py`, 원본 꺼내기 `tools/dsp_pkg_read.py`). 실기 검증 전.
+> 기준: 브리지 **v0.9.0** (패키지 보관) · 게이트웨이 **v0.7.0** (`pkg_*` 전송). 그 밖의 동작은 브리지 0.5.2 · 게이트웨이 0.3.0 기준. 시간·코드 값은 `main/dsp_ota.c`, `dsp/boot/boot_cfg.h` 기준.
 > 범위: DSP 부트로더 · 메인보드 앱 수정 · 브리지(ESP32) · 패커 · 펌웨어 관리 서버(게이트웨이, 구현됨).
 
 ## 1. 전체 구조
@@ -306,25 +306,70 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 
 ## 6. 브리지(ESP32) 변경
 
-### 파티션 (USB 로 1회 재굽기 필요 — 현장 배포 전에 확정)
+### 파티션 (USB 로 재굽기 필요 — ESP32-S3 N16, 16MB)
 
 | 이름 | 오프셋 | 크기 | 비고 |
 |---|---|---|---|
 | ota_0 | 0x020000 | 0x1C0000 (1.75MB) | 1.9MB → 축소 (현재 앱 1.2MB) |
 | ota_1 | 0x1E0000 | 0x1C0000 | |
 | **dspfw** | 0x3A0000 | 0x60000 (384KB) | 스테이징 이미지 + 메타(job, ver, crc). 재부팅 후에도 유지 |
+| **dsppkg** | 0x400000 | 0xC00000 (12MB) | 0.9.0~. 메인보드 패키지(.dsppkg) 보관 슬롯 2개. 끝 = 0x1000000 |
+
+- 0.9.0 은 기존 항목의 오프셋·크기를 바꾸지 않고 `dsppkg` 만 덧붙인다 → 파티션 표 + 앱만 다시 구우면 nvs(호기 설정)·스테이징 유지. 4MB 보드는 0.9.0 부터 지원하지 않는다(`CONFIG_ESPTOOLPY_FLASHSIZE_16MB`).
+- 이전 표인 채 OTA 로 0.9.0 앱을 받은 보드: `dsppkg` 가 없어 `pkg_st:"nopart"`, 메인보드 스테이징·적용을 `pkg_nopart` 로 거부 (부팅 로그·`dsp`·heartbeat 에 표시).
+
+### 패키지 보관 (dsppkg, 0.9.0)
+
+브리지가 메인보드에 굽는 모든 프로그램은 **짝 패키지(.dsppkg 통째)가 브리지 flash 에 있어야 한다** (필수). 브리지는 ZIP 을 풀지 않고 바이트 그대로 보관한다. 브리지를 떼어 `tools/dsp_pkg_read.py` 로 읽으면 그 AGV 에서 도는 프로그램의 `.out`·`.map` 을 되찾는다.
+
+- 슬롯 2개 (A/B): 슬롯 n 시작 = n × 0x600000. 각 슬롯 = 머리 섹터 4KB + 패키지 바이트(슬롯 오프셋 0x1000). **패키지 최대 6,287,360 B** (넘으면 `pkg_too_big`).
+- 슬롯 머리 (LE, 128 B, 섹터 나머지 0xFF, `main/dsp_pkg.c` `pkg_hdr_t`):
+
+| off | 크기 | 필드 |
+|---|---|---|
+| 0 | 8 | magic `"DSPPKG1\0"` |
+| 8 | 4 | flags — 비트를 1→0 으로만 바꿔 상태 전이 (지우기 없이 한 워드 쓰기) |
+| 12 | 4 | seq — 기록할 때마다 두 슬롯의 최댓값 + 1 |
+| 16 | 4 | pkg_size |
+| 20 | 4 | job (게이트웨이 작업 번호, USB 는 0) |
+| 24 | 4 | dspfw_crc — 짝 .dspfw 의 파일 CRC (= 스테이징 머리 file_crc, .dspfw 파일 오프셋 12) |
+| 28 | 17 | pkg_id ASCII 16자 + NUL |
+| 45 | 16 | ver (NUL 패딩, 1~8자) |
+| 61 | 32 | sha256 (패키지 전체) |
+| 93 | 35 | 예약 (0xFF) |
+
+- flags (처음 0xFFFFFFFF): bit0=0 기록 완료 / bit1=0 적용됨 / bit2=0 지난 것. 해석: magic 불일치 또는 bit0=1 → 빈 슬롯, bit1=1 → **STAGED**, bit2=1 → **APPLIED**, 그 외 **OLD**. 두 슬롯이 모두 APPLIED(OLD 표시 전 전원 차단)면 seq 큰 쪽이 현재.
+- 새 패키지를 쓸 슬롯: 현재 APPLIED 가 아닌 슬롯 (둘 다 아니면 빈 슬롯, 없으면 seq 작은 쪽). 머리 섹터부터 4KB 씩 지우며 기록, 쓴 바이트를 flash 에서 다시 읽어 sha256 을 스트리밍 계산. 머리는 flags=0xFFFFFFFF 로 쓴 뒤 마지막에 flags 워드만 bit0 → 0.
+- 시간 (어림): 지우기 4KB 당 수십 ms (6MB = 1,536 섹터 → 1분 안팎, 섹터마다 1 tick 양보), 적용 전 sha256 재계산은 6MB 에 1초 안팎(64KB 마다 양보). 받는 동안 UART 중계는 계속된다.
+
+| 단계 | 동작 |
+|---|---|
+| 스테이징 (START) | `pkg_*` 검사 → 패키지를 받아 슬롯에 기록 (sha256 확인) → 기존대로 .dspfw 스테이징 → 둘 다 끝나면 슬롯 bit0 → 0 (dspfw_crc = 스테이징 파일 CRC). 하나라도 실패하면 슬롯은 bit0=1 로 남아 무시. `download` pct 는 (패키지 + .dspfw) 합계 바이트 기준 |
+| 적용 (APPLY · START apply:1 · `dsp apply`) | 메인보드를 지우기 **전에** dspfw_crc == 스테이징 file_crc 인 STAGED 슬롯을 찾아 sha256 을 flash 에서 다시 계산. 없거나 다르면 `no_pkg` (메인보드 그대로). `done`(버전 확인까지) 뒤 그 슬롯 bit1 → 0 (APPLIED), 이전 APPLIED 슬롯 bit2 → 0 (OLD). 실패하면 슬롯은 STAGED 그대로 |
+| USB (`dsp_usb_stage.py`) | 보드의 파티션 표·두 슬롯 머리(4KB 씩)를 읽고 같은 규칙으로 슬롯을 골라, write_flash 한 번에 dspfw 스테이징 + 슬롯(bit0=0, job 0, seq = 최댓값 + 1). `--bridge` 는 빈 보드로 보고 슬롯 0, seq 1 |
 
 ### UDP 패킷 추가
 
 | type | 방향 | payload |
 |---|---|---|
 | `0x11` INFO_REQ | 서버 → ESP | 없음 |
-| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw(ESP), part, ota, cfg, setup, up, dsp(앱 버전), dspb(부트로더 버전), dsp_build, dsp_st, staged{job, ver} |
-| `0x32` DSP_OTA_START | 서버 → ESP | JSON: url(199자 이하), ver, crc32, size, job, apply(0/1), recover(선택, 1) |
+| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw(ESP), part, ota, cfg, setup, up, dsp(앱 버전), dspb(부트로더 버전), dsp_build, dsp_st, staged{job, ver, pkg}, pkg_st, dsp_pkg{id, ver} |
+| `0x32` DSP_OTA_START | 서버 → ESP | JSON: url(199자 이하), ver, crc32, size, job, apply(0/1), recover(선택, 1), **pkg_url, pkg_size, pkg_sha256, pkg_id** (0.9.0~ 필수, 아래) |
 | `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage, pct, ver, err (아래 표) |
 | `0x34` DSP_OTA_APPLY | 서버 → ESP | JSON: job, recover(선택, 1 = 복구 적용) |
 
-- heartbeat(STATUS) 에 `mac`, `dsp`, `dspb`, `dsp_build`, `dsp_st`, `staged` 필드가 있다. 서버는 이것으로 전 호기 버전 현황을 갱신하고, 최종 보고가 유실돼도 `staged.job`·`dsp`·`dsp_st` 로 판정한다.
+- heartbeat(STATUS) 에 `mac`, `dsp`, `dspb`, `dsp_build`, `dsp_st`, `staged`, `pkg_st`, `dsp_pkg` 필드가 있다. 서버는 이것으로 전 호기 버전 현황을 갱신하고, 최종 보고가 유실돼도 `staged.job`·`dsp`·`dsp_st` 로 판정한다.
+- 패키지 필드 (0.9.0): `pkg_st` = `"ok"` | `"nopart"`, `dsp_pkg` = 현재 APPLIED 슬롯 `{"id":"<16hex>","ver":"1.2.3"}` 또는 `null`, `staged` 객체의 `"pkg":"<16hex>"` = 짝 STAGED 패키지 ID (있을 때만). stat json 의 `dsp` 객체에는 `pkg_st`·`pkg` 로 들어간다.
+- START 의 `pkg_*` (모두 필수, 0.9.0~ · 게이트웨이 0.7.0+):
+
+| 키 | 값 |
+|---|---|
+| `pkg_url` | 패키지 URL. 규칙은 `url` 과 같음 (http, 호스트 = 브리지 `server` IP, 199자 이하, 리다이렉트 포함) |
+| `pkg_size` | 패키지 바이트 수 (1 ~ 6,287,360) |
+| `pkg_sha256` | 패키지 sha256 소문자 hex 64자 |
+| `pkg_id` | 패키지 ID 소문자 hex 16자 (= manifest.json ZIP 항목 바이트의 sha256 앞 16자) |
+
+  하나라도 없거나 형식이 틀리면 받지 않고 `no_pkg` (메인보드·기존 스테이징 그대로). 같은 job 중복 START·replay 규칙은 그대로다.
 - 브리지는 부팅 3초 뒤, 그리고 DSP 업데이트 후에 버전 조회(`F…V000`)를 보내 `dsp`/`dspb` 를 갱신한다. 응답이 없으면 `dsp`·`dsp_build` 를 `"?"` 로 바꾼다(미지원 구 펌웨어, 앱 없음, 멈춘 앱. `dspb` 는 마지막으로 안 값을 유지). `"?"` 인 동안 60초마다 다시 묻는다. 콘솔 `dsp ver` 도 같은 규칙이다. 송신 실패(대기열 가득)는 버전을 그대로 둔다.
 - 지우기를 시작할 때와, 적용에서 앱이 조용해 `app_no_reply` 로 끝날 때도 `"?"` 로 바꾼다. 버전을 아는 동안에는 주기 조회를 하지 않으므로, 앱이 나중에 멈추면 다음 적용 시도나 `dsp ver` 때 `"?"` 가 된다.
 
@@ -344,7 +389,7 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 | `done` | 100 | 완료 (`ver` = 앱이 보고한 버전) — 최종 보고 |
 | `fail` | — | 실패 (`err`) — 최종 보고 |
 
-최종 보고(`staged`·`done`·`fail`)는 같은 내용을 약 300ms 간격으로 3번 보낸다. 서버 수신 단계에서 바로 거부하는 것(`bad_request`·`url_too_long`·`url_host`·`busy`·`not_ready`)은 간격 없이 3번 보낸다.
+최종 보고(`staged`·`done`·`fail`)는 같은 내용을 약 300ms 간격으로 3번 보낸다. 서버 수신 단계에서 바로 거부하는 것(`bad_request`·`url_too_long`·`url_host`·`no_pkg`·`pkg_nopart`·`pkg_too_big`·`pkg_url_too_long`·`pkg_url_host`·`busy`·`not_ready`)은 간격 없이 3번 보낸다.
 
 #### DSP_OTA_RESULT err
 
@@ -355,6 +400,13 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 | 수신 | `url_host` | URL 호스트(리다이렉트 포함)가 설정된 `server` IP 가 아님. 호스트 이름·사용자 정보·IPv6 도 거부 | 유지 |
 | 수신 | `busy` / `not_ready` | 명령 큐(2칸)가 가득 참 / 초기화 전. 굽는 중에 온 START 는 큐에서 기다렸다가 굽기가 끝난 뒤 처리 (같은 job 중복은 6절 끝) | 유지 |
 | 수신 | `no_partition` | `dspfw` 파티션 없음 (구 파티션 테이블) | — |
+| 수신 | `no_pkg` | `pkg_url`·`pkg_size`·`pkg_sha256`·`pkg_id` 중 하나라도 없거나 형식 오류 (0.6.x 게이트웨이) | 유지 |
+| 수신 | `pkg_nopart` | `dsppkg` 파티션 없음 (0.9.0 이전 파티션 표 — USB 로 표 + 앱 다시 굽기) | 유지 |
+| 수신 | `pkg_too_big` | `pkg_size` 가 6,287,360 B 초과 | 유지 |
+| 수신 | `pkg_url_too_long` · `pkg_url_host` | 패키지 URL 이 199자 초과 / 호스트가 `server` IP 아님 (리다이렉트는 받기 단계에서 같은 코드) | 유지 |
+| 받기 | `pkg_size` | 패키지 Content-Length·받은 크기 ≠ `pkg_size` | 유지 |
+| 받기 | `pkg_sha` | 받아 기록한 패키지의 sha256 ≠ `pkg_sha256` | 유지 |
+| 받기 | `pkg_http_init` · `pkg_http_open` · `pkg_http_status` · `pkg_http_read` · `pkg_flash` | 패키지 HTTP 받기 실패 / dsppkg 플래시 오류 (`pkg_flash` 는 확정 단계면 .dspfw 스테이징도 지움) | 유지 (패키지 단계는 .dspfw 를 아직 안 받음) |
 | 받기 | `esp_ota_busy` | 브리지 자체 OTA 진행 중 | 유지 |
 | 받기 | `http_init` · `http_open` · `http_status` · `http_length` · `http_read` · `http_short` · `http_overrun` | HTTP 받기 실패 (`http_length`: 크기가 160 B 미만·파티션 초과·`size` 와 다름) | 머리 검사 전이면 유지 |
 | 받기 | `image_crc` | 파일 magic·길이·앱 헤더·파일 CRC32 오류 | 머리 160 B 에서 걸리면 유지 |
@@ -363,6 +415,8 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 | 받기 | `crc_mismatch` | 파일 CRC 가 서버가 준 `crc32` 와 다름 | 지워짐 |
 | 받기 | `flash_erase` · `flash_write` · `stage_read` | 브리지 플래시 오류 | 지워짐 |
 | 적용 | `not_staged` | 스테이징된 이미지 없음. `start`·`fail` 보고의 job 은 0 | — |
+| 적용 | `no_pkg` | 짝 패키지(dspfw_crc = 스테이징 file_crc 인 STAGED 슬롯)가 없거나 flash 의 sha256 이 다름 — 메인보드를 건드리지 않음 | 유지 |
+| 적용 | `pkg_nopart` | `dsppkg` 파티션 없음 | 유지 |
 | 적용 | `job_mismatch` | 스테이징한 job 과 APPLY 의 job 이 다름 (job 0 은 검사 안 함) | 유지 |
 | 적용 | `stage_invalid` | 지우기 전 재검사에서 파일 형식·CRC 오류 (재검사의 `ver_invalid`·`image_bad`·`stage_read` 는 그 코드 그대로) | 유지 |
 | 적용 | `esp_ota_busy` | 브리지 자체 OTA 진행 중 | 유지 |

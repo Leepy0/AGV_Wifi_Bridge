@@ -30,7 +30,8 @@ size_t net_test(const char *host, char *buf, size_t cap) {
     return (size_t)snprintf(buf, cap, "ping x: 3/3 ok, avg 4 ms\n");
 }
 size_t dsp_ota_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
-size_t dsp_ota_pkg_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
+static int s_pkg_fmt;
+size_t dsp_ota_pkg_format(char *buf, size_t cap) { s_pkg_fmt++; return (size_t)snprintf(buf, cap, "pkg slot0: empty\npkg slot1: empty\n"); }
 void dsp_ota_query_version(void) {}
 void dsp_ota_apply(const char *json, size_t len) {}
 size_t cfg_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
@@ -163,6 +164,14 @@ int main(void)
     s_dsp_prog = false;
     run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
     CHECK(strstr(out, "scan") != NULL && strstr(out, "nettest [host]") != NULL);
+
+    // dsp pkg: 보관 패키지 슬롯 (읽기 전용 — 원격·BLE 에서도)
+    run("dsp pkg", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_pkg_fmt == 1 && strstr(out, "pkg slot1: empty") != NULL && act == CMD_ACT_NONE);
+    run("dsp pkg", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_pkg_fmt == 2);
+    run("help", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(strstr(out, "dsp [ver|apply|pkg]") != NULL);
 
     // 시각 동기: time 명령, stat 텍스트에도 한 줄
     run("time", CMD_SRC_LOCAL, out, sizeof(out), &act);
