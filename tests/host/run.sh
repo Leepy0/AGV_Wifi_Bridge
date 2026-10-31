@@ -43,7 +43,7 @@ cmp "$OUT/golden.dspfw" "$HT/golden/app_golden.dspfw"
 python3 "$ROOT/tools/dsp_pack.py" info "$HT/golden/app_golden.dspfw"
 python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ROOT/tools/dsp_flash.py"
 
-echo "== .dsppkg bundle/verify + dsp_usb_stage.py (가짜 hex2000·가짜 esptool, stage_hdr_t·partitions.csv 대조)"
+echo "== .dsppkg bundle/verify + dsp_usb_stage.py + dsp_pkg_read.py (가짜 hex2000·가짜 esptool, stage_hdr_t·pkg_hdr_t·partitions.csv 대조)"
 python3 "$HT/test_usb_stage.py"
 
 echo "host tests: all passed"

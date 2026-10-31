@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""메인보드 프로그램(.dsppkg)을 USB 로 브리지의 dspfw 파티션에 직접 넣기 — 검수용 (협력사가 만든 신규 AGV)
+"""메인보드 프로그램(.dsppkg)을 USB 로 브리지에 직접 넣기 — 검수용 (협력사가 만든 신규 AGV)
+.dspfw 는 dspfw 파티션에 스테이징하고, 패키지 통째(.dspfw+.out+.map)는 dsppkg 파티션 슬롯에 보관한다 (0.9.0~, 16MB 보드).
 
-  dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg                          # 파티션 표를 보드에서 읽어 dspfw 파티션만 씀 (설정 유지)
+  dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg                          # 보드의 파티션 표·슬롯 머리를 읽고 두 파티션만 씀 (설정 유지)
   dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg --bridge agv_wifi_bridge_merged.bin
-                                                                       # 브리지 전체 이미지 + 스테이징을 한 번에 (저장된 호기 설정이 지워짐)
-  dsp_usb_stage.py - AGV_Main_1.2.3.dsppkg --write-blob stage.bin      # 보드 없이 스테이징 이미지만 파일로 (시험용)
+                                                                       # 브리지 전체 이미지 + 스테이징 + 보관을 한 번에 (저장된 호기 설정이 지워짐)
+  dsp_usb_stage.py - AGV_Main_1.2.3.dsppkg --write-blob stage.bin      # 보드 없이 파일로만 (시험용):
+                                                                       #  stage.bin = dspfw 오프셋 0, stage.pkg.bin = dsppkg 슬롯 0 (seq 1)
 
   옵션: --baud 921600  --esptool "python -m esptool"
 
 패키지(.dsppkg)만 받는다 — 맨 .dspfw 는 거부한다 (.out/.map 보관이 목적). 패키지는 dsp_pack.py verify_package 로 전부 검증한 뒤 쓴다.
+보관 슬롯은 브리지와 같은 규칙으로 고른다 (현재 APPLIED 가 아닌 슬롯, seq = 두 슬롯 최댓값 + 1). 쓰기는 write_flash 한 번.
 쓰고 나면 브리지가 재부팅하며 스테이징을 인식한다. 이어서 브리지 콘솔/BLE 에서 `dsp` 로 확인하고 AGV 를 세운 상태에서 `dsp apply`.
-규격: docs/DSP_OTA_DESIGN.md 3-1절(패키지), 스테이징 머리는 main/dsp_ota.c 의 stage_hdr_t 와 같음. esptool 필요 (pip install esptool).
+규격: docs/DSP_OTA_DESIGN.md 3-1절(패키지)·6절(보관 슬롯). 스테이징 머리는 main/dsp_ota.c 의 stage_hdr_t, 슬롯 머리는
+main/dsp_pkg.c 의 pkg_hdr_t 와 같음. esptool 필요 (pip install esptool).
 """
 import argparse
 import glob
+import hashlib
 import importlib.util
 import os
 import re
@@ -41,6 +46,18 @@ DSPFW_SUBTYPE   = 0x40
 DSPFW_DEFAULT_OFFSET = 0x3A0000
 DSPFW_DEFAULT_SIZE   = dsp_pack.STAGE_PART_SIZE   # 0x60000
 SECTOR          = 0x1000
+# 패키지 보관 (main/dsp_pkg.h): 슬롯 2개 × 6MB, 슬롯 = 머리 섹터 4KB + 패키지 바이트
+DSPPKG_LABEL    = "dsppkg"
+DSPPKG_SUBTYPE  = 0x41
+DSPPKG_DEFAULT_OFFSET = 0x400000
+DSPPKG_DEFAULT_SIZE   = 0xC00000
+PKG_SLOTS       = 2
+PKG_SLOT_SIZE   = 0x600000
+PKG_HDR_SECTOR  = 0x1000
+PKG_MAX         = PKG_SLOT_SIZE - PKG_HDR_SECTOR    # 6,287,360 B
+PKG_MAGIC       = b"DSPPKG1\0"
+PKG_HDR_FMT     = "<8sIIIII17s16s32s35s"            # magic flags seq pkg_size job dspfw_crc pkg_id ver sha256 rsvd = 128 B
+PKG_F_WRITTEN, PKG_F_APPLIED, PKG_F_OLD = 1, 2, 4   # 비트가 0 이면 해당 상태 (1→0 으로만 바뀜)
 
 
 # ───────── 스테이징 이미지 ─────────
@@ -57,6 +74,65 @@ def build_stage_blob(dspfw: bytes, ver: str, app_crc: int, pkg_id: str) -> bytes
                       ver.encode("ascii"), pkg_id.encode("ascii") + bytes(8))
     assert len(hdr) == STAGE_HDR_LEN
     return hdr + dspfw
+
+
+# ───────── 패키지 보관 슬롯 (dsppkg) ─────────
+
+def build_pkg_slot(pkg: bytes, dspfw_crc: int, seq: int, pkg_id: str, ver: str, job: int = 0) -> bytes:
+    """dsppkg 슬롯 시작에 들어가는 이미지: 머리 섹터 4KB(머리 128 B + 0xFF) + 패키지 바이트.
+    flags 는 bit0 만 0 (기록 완료 = STAGED). esptool 이 섹터를 지우고 쓰므로 한 번에 써도 된다"""
+    if not 1 <= len(pkg) <= PKG_MAX:
+        raise ValueError(f"패키지({len(pkg)} B)가 보관 한도({PKG_MAX} B = 6MB − 4KB)를 넘음")
+    if not re.fullmatch(r"[0-9a-f]{16}", pkg_id):
+        raise ValueError(f"패키지 ID 형식 오류: {pkg_id!r}")
+    hdr = struct.pack(PKG_HDR_FMT, PKG_MAGIC, 0xFFFFFFFF & ~PKG_F_WRITTEN, seq, len(pkg), job, dspfw_crc,
+                      pkg_id.encode("ascii") + b"\0", ver.encode("ascii").ljust(16, b"\0"),
+                      hashlib.sha256(pkg).digest(), b"\xFF" * 35)
+    assert len(hdr) == 128
+    return hdr.ljust(PKG_HDR_SECTOR, b"\xFF") + pkg
+
+
+def parse_pkg_slot(data: bytes):
+    """슬롯 머리(앞 128 B 이상) → {state, flags, seq, size, job, dspfw_crc, id, ver, sha256} 또는 None (빈 슬롯/쓰다 만 슬롯).
+    state: STAGED / APPLIED / OLD (두 슬롯이 모두 APPLIED 인 경우는 resolve_slots 가 정리)"""
+    if len(data) < 128:
+        return None
+    magic, flags, seq, size, job, crc, pid, ver, sha, _ = struct.unpack_from(PKG_HDR_FMT, data, 0)
+    if magic != PKG_MAGIC or flags & PKG_F_WRITTEN:
+        return None
+    pid = pid.split(b"\0", 1)[0].decode("ascii", "replace")
+    ver = ver.split(b"\0", 1)[0].decode("ascii", "replace")
+    if not (1 <= size <= PKG_MAX and re.fullmatch(r"[0-9a-f]{16}", pid) and dsp_pack.VER_RE.fullmatch(ver)):
+        return None
+    state = "STAGED" if flags & PKG_F_APPLIED else ("APPLIED" if flags & PKG_F_OLD else "OLD")
+    return {"state": state, "flags": flags, "seq": seq, "size": size, "job": job, "dspfw_crc": crc, "id": pid, "ver": ver,
+            "sha256": sha}
+
+
+def resolve_slots(heads: list) -> list:
+    """슬롯 머리 2개 해석 (브리지 dsp_pkg.c 와 같은 규칙): 둘 다 APPLIED(OLD 표시 전 전원 차단)면 seq 큰 쪽이 현재, 작은 쪽은 OLD"""
+    s = [parse_pkg_slot(h) for h in heads]
+    if s[0] and s[1] and s[0]["state"] == s[1]["state"] == "APPLIED":
+        s[0 if s[0]["seq"] < s[1]["seq"] else 1]["state"] = "OLD"
+    return s
+
+
+def choose_slot(slots: list):
+    """새 패키지를 쓸 슬롯과 seq: 현재 APPLIED 가 아닌 슬롯 (둘 다 아니면 빈 슬롯, 없으면 seq 가 작은 쪽), seq = 최댓값 + 1"""
+    seq = max([x["seq"] for x in slots if x] or [0]) + 1
+    cur = [i for i, x in enumerate(slots) if x and x["state"] == "APPLIED"]
+    if cur:
+        return 1 - cur[0], seq
+    for i, x in enumerate(slots):
+        if not x:
+            return i, seq
+    return (0 if slots[0]["seq"] <= slots[1]["seq"] else 1), seq
+
+
+def slot_line(i: int, x) -> str:
+    if not x:
+        return f"slot{i}: empty"
+    return f"slot{i}: {x['state']} id={x['id']} ver={x['ver']} size={x['size']} seq={x['seq']} job={x['job']}"
 
 
 # ───────── 파티션 표 ─────────
@@ -79,20 +155,36 @@ def parse_partition_table(data: bytes) -> list:
     return out
 
 
-def find_dspfw_partition(table: list):
-    """dspfw 파티션 항목 (없으면 None). 형식(data/0x40)·4KB 정렬이 다르면 ValueError"""
+def find_partition(table: list, label: str, subtype: int, min_size: int = 0):
+    """label 파티션 항목 (없으면 None). 형식(data/subtype)·4KB 정렬·최소 크기가 다르면 ValueError"""
     for e in table:
-        if e["label"] == DSPFW_LABEL:
-            if e["type"] != PT_TYPE_DATA or e["subtype"] != DSPFW_SUBTYPE:
-                raise ValueError(f"dspfw 파티션 형식이 예상과 다름 (type {e['type']:#x}, subtype {e['subtype']:#x}; data/0x40 이어야 함)")
+        if e["label"] == label:
+            if e["type"] != PT_TYPE_DATA or e["subtype"] != subtype:
+                raise ValueError(f"{label} 파티션 형식이 예상과 다름 (type {e['type']:#x}, subtype {e['subtype']:#x}; "
+                                 f"data/{subtype:#x} 이어야 함)")
             if e["offset"] % SECTOR:
-                raise ValueError(f"dspfw 파티션 오프셋 0x{e['offset']:X} 가 4KB 경계가 아님")
+                raise ValueError(f"{label} 파티션 오프셋 0x{e['offset']:X} 가 4KB 경계가 아님")
+            if e["size"] < min_size:
+                raise ValueError(f"{label} 파티션(0x{e['size']:X})이 0x{min_size:X} 보다 작음")
             return e
     return None
 
 
+def find_dspfw_partition(table: list):
+    """dspfw 파티션 항목 (없으면 None). 형식(data/0x40)·4KB 정렬이 다르면 ValueError"""
+    return find_partition(table, DSPFW_LABEL, DSPFW_SUBTYPE)
+
+
+def find_dsppkg_partition(table: list):
+    """dsppkg 파티션 항목 (없으면 None). 형식(data/0x41)·4KB 정렬·크기(슬롯 2개 = 12MB)가 다르면 ValueError"""
+    return find_partition(table, DSPPKG_LABEL, DSPPKG_SUBTYPE, PKG_SLOTS * PKG_SLOT_SIZE)
+
+
 NO_DSPFW_MSG = ("dspfw 파티션이 없음 — 이 브리지는 0.5.0 이전의 파티션 배치입니다. 전체 이미지를 함께 굽는 "
                 "--bridge agv_wifi_bridge_merged.bin 을 주세요 (이 경우 저장된 호기 설정이 지워집니다)")
+NO_DSPPKG_MSG = ("dsppkg 파티션이 없음 — 이 브리지는 0.9.0 이전의 파티션 배치라 패키지(.out/.map)를 보관할 수 없습니다. "
+                 "16MB(N16) 보드에 이 릴리스로 다시 구우세요: 설정을 지켜도 되면 FLASH_GUIDE 3-2 의 4개 파일 방법"
+                 "(파티션 표 + 앱, 설정 유지), 아니면 --bridge agv_wifi_bridge_merged.bin (저장된 호기 설정이 지워짐)")
 
 
 # ───────── esptool ─────────
@@ -137,15 +229,25 @@ def run_esptool(esptool: list, port: str, baud: int, after: str, args: list):
                          "BOOT 를 누른 채 RESET 을 눌렀다 놓은 뒤 다시 실행하세요")
 
 
-def read_board_table(esptool: list, port: str, baud: int) -> bytes:
+def read_board(esptool: list, port: str, baud: int, offset: int, size: int, what: str, min_len=None) -> bytes:
     with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "ptable.bin")
-        run_esptool(esptool, port, baud, "no_reset", ["read_flash", hex(PT_OFFSET), hex(PT_SIZE), p])
+        p = os.path.join(d, "read.bin")
+        run_esptool(esptool, port, baud, "no_reset", ["read_flash", hex(offset), hex(size), p])
         with open(p, "rb") as f:
             data = f.read()
-    if len(data) < PT_ENTRY:
-        raise ValueError("보드에서 파티션 표를 읽지 못함")
-    return data
+    if len(data) < (size if min_len is None else min_len):
+        raise ValueError(f"보드에서 {what}을(를) 읽지 못함 ({len(data)}/{size} B)")
+    return data[:size]
+
+
+def read_board_table(esptool: list, port: str, baud: int) -> bytes:
+    return read_board(esptool, port, baud, PT_OFFSET, PT_SIZE, "파티션 표", PT_ENTRY)
+
+
+def read_board_slots(esptool: list, port: str, baud: int, part: dict) -> list:
+    """두 슬롯의 머리 섹터 (0x1000 씩). 16MB 가 아닌 보드는 여기서 esptool 이 실패한다"""
+    return [read_board(esptool, port, baud, part["offset"] + i * PKG_SLOT_SIZE, PKG_HDR_SECTOR, f"패키지 슬롯 {i} 머리")
+            for i in range(PKG_SLOTS)]
 
 
 # ───────── 실행 ─────────
@@ -167,15 +269,22 @@ def check_fit(blob: bytes, part: dict):
         raise ValueError(f"스테이징 이미지({len(blob)} B)가 dspfw 파티션(0x{part['size']:X} = {part['size']} B)보다 큼")
 
 
+def pkg_blob_path(stage_path: str) -> str:
+    """--write-blob FILE 의 패키지 슬롯 이미지 이름: stage.bin → stage.pkg.bin"""
+    root, ext = os.path.splitext(stage_path)
+    return root + ".pkg" + (ext or ".bin")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("port", help="브리지 USB 시리얼 포트 (예: COM5, /dev/ttyUSB0). --write-blob 일 때는 '-' 가능")
     p.add_argument("package", help="메인보드 프로그램 패키지 (.dsppkg)")
     p.add_argument("--bridge", metavar="MERGED.bin", help="브리지 전체 이미지(agv_wifi_bridge_merged.bin)도 함께 굽기. "
-                   "보드의 파티션 표에 dspfw 가 없을 때(0.5.0 이전)에 쓰며, 저장된 호기 설정이 지워짐")
+                   "보드의 파티션 표에 dspfw·dsppkg 가 없을 때(0.9.0 이전)에 쓰며, 저장된 호기 설정이 지워짐 (보관 슬롯은 비었다고 보고 슬롯 0)")
     p.add_argument("--baud", type=int, default=921600)
     p.add_argument("--esptool", metavar="CMD", help='esptool 실행 명령 (기본: 자동 탐색). 예: "python -m esptool"')
-    p.add_argument("--write-blob", metavar="FILE", help="스테이징 이미지(머리 64 B + .dspfw)를 파일로만 쓰고 끝냄 — 보드를 건드리지 않음 (시험용)")
+    p.add_argument("--write-blob", metavar="FILE", help="스테이징 이미지(머리 64 B + .dspfw)를 FILE 에, 보관 슬롯 이미지(머리 섹터 + 패키지, "
+                   "슬롯 0·seq 1)를 FILE.pkg.bin 에 쓰고 끝냄 — 보드를 건드리지 않음 (시험용)")
     a = p.parse_args()
     for s in (sys.stdout, sys.stderr):      # 출력이 파이프일 때 로케일에 없는 글자 때문에 죽지 않게
         try:
@@ -186,10 +295,16 @@ def main():
         res = load_package(a.package)
         for w in res["warnings"]:
             print(f"warning: {w}", file=sys.stderr)
+        with open(a.package, "rb") as f:
+            pkg = f.read()
+        if len(pkg) > PKG_MAX:
+            raise ValueError(f"패키지({len(pkg)} B)가 브리지 보관 한도({PKG_MAX} B = 6MB − 4KB)를 넘음 — .map/.out 을 확인하세요")
         di = res["dspfw_info"]
-        blob = build_stage_blob(res["dspfw_bytes"], res["ver"], di["app_crc"], res["pkg_id"])
+        dspfw = res["dspfw_bytes"]
+        file_crc = struct.unpack_from("<I", dspfw, 12)[0]
+        blob = build_stage_blob(dspfw, res["ver"], di["app_crc"], res["pkg_id"])
         print(f"package: {os.path.basename(a.package)}  ver {res['ver']}, pkg id {res['pkg_id']}, link_check {res['link_check']}, "
-              f".dspfw {len(res['dspfw_bytes'])} B -> 스테이징 이미지 {len(blob)} B", file=sys.stderr)
+              f"{len(pkg)} B, .dspfw {len(dspfw)} B -> 스테이징 이미지 {len(blob)} B", file=sys.stderr)
 
         merged = None
         if a.bridge:
@@ -197,48 +312,74 @@ def main():
                 merged = f.read()
             if len(merged) < PT_OFFSET + PT_ENTRY or merged[0] != 0xE9:
                 raise ValueError(f"브리지 전체 이미지가 아님: {a.bridge} (agv_wifi_bridge_merged.bin 이어야 함)")
-            part = find_dspfw_partition(parse_partition_table(merged[PT_OFFSET:PT_OFFSET + PT_SIZE]))
-            if part is None:
-                raise ValueError(f"{a.bridge} 의 파티션 표에 dspfw 가 없음 — 0.5.0 이상 브리지의 전체 이미지가 필요합니다")
+            table = parse_partition_table(merged[PT_OFFSET:PT_OFFSET + PT_SIZE])
+            part, ppart = find_dspfw_partition(table), find_dsppkg_partition(table)
+            if part is None or ppart is None:
+                raise ValueError(f"{a.bridge} 의 파티션 표에 {'dspfw' if part is None else 'dsppkg'} 가 없음 — "
+                                 "0.9.0 이상 브리지의 전체 이미지가 필요합니다")
             if len(merged) > part["offset"]:
                 raise ValueError(f"전체 이미지({len(merged)} B)가 dspfw 파티션 시작(0x{part['offset']:X})을 넘어 겹침")
 
         if a.write_blob:
             part = part if merged else {"offset": DSPFW_DEFAULT_OFFSET, "size": DSPFW_DEFAULT_SIZE}
             check_fit(blob, part)
+            pslot = build_pkg_slot(pkg, file_crc, 1, res["pkg_id"], res["ver"])
+            pp = pkg_blob_path(a.write_blob)
             with open(a.write_blob, "wb") as f:
                 f.write(blob)
-            print(f"wrote {a.write_blob} ({len(blob)} B) — 보드는 건드리지 않음", file=sys.stderr)
+            with open(pp, "wb") as f:
+                f.write(pslot)
+            print(f"wrote {a.write_blob} ({len(blob)} B), {pp} ({len(pslot)} B, 슬롯 0 seq 1) — 보드는 건드리지 않음", file=sys.stderr)
             return
         if a.port == "-":
             raise ValueError("포트를 지정하세요 (예: COM5). '-' 는 --write-blob 과 함께만 씁니다")
 
         esptool = find_esptool(a.esptool)
-        if not merged:
+        if merged:
+            slots = [None, None]            # 전체를 새로 구우므로 보관 슬롯은 빈 것으로 본다
+        else:
             print(f"보드의 파티션 표를 읽습니다 (0x{PT_OFFSET:X}, {PT_SIZE} B)...", file=sys.stderr)
-            part = find_dspfw_partition(parse_partition_table(read_board_table(esptool, a.port, a.baud)))
+            table = parse_partition_table(read_board_table(esptool, a.port, a.baud))
+            part = find_dspfw_partition(table)
             if part is None:
                 raise ValueError(NO_DSPFW_MSG)
-        if (part["offset"], part["size"]) != (DSPFW_DEFAULT_OFFSET, DSPFW_DEFAULT_SIZE):
-            print(f"warning: dspfw 파티션이 기본값(0x{DSPFW_DEFAULT_OFFSET:X}, 0x{DSPFW_DEFAULT_SIZE:X})과 다름: "
-                  f"0x{part['offset']:X}, 0x{part['size']:X} — 표의 값을 따릅니다", file=sys.stderr)
+            ppart = find_dsppkg_partition(table)
+            if ppart is None:
+                raise ValueError(NO_DSPPKG_MSG)
+            print("보관 슬롯 머리를 읽습니다 (2 × 4KB)...", file=sys.stderr)
+            slots = resolve_slots(read_board_slots(esptool, a.port, a.baud, ppart))
+            for i, x in enumerate(slots):
+                print("  " + slot_line(i, x), file=sys.stderr)
+        for e, lab, off, size in ((part, "dspfw", DSPFW_DEFAULT_OFFSET, DSPFW_DEFAULT_SIZE),
+                                  (ppart, "dsppkg", DSPPKG_DEFAULT_OFFSET, DSPPKG_DEFAULT_SIZE)):
+            if (e["offset"], e["size"]) != (off, size):
+                print(f"warning: {lab} 파티션이 기본값(0x{off:X}, 0x{size:X})과 다름: 0x{e['offset']:X}, 0x{e['size']:X} — "
+                      "표의 값을 따릅니다", file=sys.stderr)
         check_fit(blob, part)
+        slot, seq = choose_slot(slots)
+        pslot = build_pkg_slot(pkg, file_crc, seq, res["pkg_id"], res["ver"])
+        pofs = ppart["offset"] + slot * PKG_SLOT_SIZE
+        print(f"패키지 보관: 슬롯 {slot} (0x{pofs:X}), seq {seq}", file=sys.stderr)
 
         with tempfile.TemporaryDirectory() as d:
-            bp = os.path.join(d, "dspfw_stage.bin")
+            bp, pp = os.path.join(d, "dspfw_stage.bin"), os.path.join(d, "dsppkg_slot.bin")
             with open(bp, "wb") as f:
                 f.write(blob)
+            with open(pp, "wb") as f:
+                f.write(pslot)
+            pairs = [hex(part["offset"]), bp, hex(pofs), pp]
             if merged:
                 print("주의: --bridge 로 브리지 전체 이미지를 굽습니다 — 저장된 호기 설정(NVS)이 지워지니 끝난 뒤 다시 설정해야 합니다.", file=sys.stderr)
-                run_esptool(esptool, a.port, a.baud, "hard_reset", ["write_flash", "0x0", a.bridge, hex(part["offset"]), bp])
+                run_esptool(esptool, a.port, a.baud, "hard_reset", ["write_flash", "0x0", a.bridge] + pairs)
             else:
-                print("호기 설정은 그대로 두고 dspfw 파티션만 씁니다.", file=sys.stderr)
-                run_esptool(esptool, a.port, a.baud, "hard_reset", ["write_flash", hex(part["offset"]), bp])
+                print("호기 설정은 그대로 두고 dspfw·dsppkg 파티션만 씁니다.", file=sys.stderr)
+                run_esptool(esptool, a.port, a.baud, "hard_reset", ["write_flash"] + pairs)
         print(f"""
-완료. 브리지가 재부팅되며 스테이징을 인식합니다. 다음 순서:
-  1. 브리지 콘솔(115200) 또는 BLE 터미널에서 `dsp` 를 입력해 staged={res['ver']}(job 0) 으로 보이는지 확인
+완료. 브리지가 재부팅되며 스테이징과 보관 패키지를 인식합니다. 다음 순서:
+  1. 브리지 콘솔(115200) 또는 BLE 터미널에서 `dsp` 를 입력해 staged={res['ver']}(job 0) staged_pkg={res['pkg_id']} 로 보이는지 확인
+     (`dsp pkg` = 보관 슬롯 상태)
   2. AGV 를 세운 상태에서 `dsp apply` (앱에 진입 요청 -> 부트로더 -> 지우기·쓰기·검증·리셋, 약 20~30초)
-  3. 다시 `dsp` 로 app={res['ver']} 인지 메인보드 버전 확인
+  3. 다시 `dsp` 로 app={res['ver']} pkg={res['pkg_id']}({res['ver']}) 인지 확인
 ※ 메인보드에 상주 부트로더(1.1.0)가 JTAG 으로 먼저 구워져 있어야 합니다 (docs/FLASH_GUIDE.md 8장).""")
     except (ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
