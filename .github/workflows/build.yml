@@ -173,7 +173,7 @@ jobs:
               "zip": ent(f"dist/agv_wifi_bridge_{ver}.zip"),
               "app": ent(f"{d}/agv_wifi_bridge.bin", "0x20000"),
               "merged": ent(f"{d}/agv_wifi_bridge_merged.bin", "0x0"),
-              "minPartitionVersion": "0.5.0",
+              "minPartitionVersion": "0.9.0",
               "notes": subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip(),
           }
           json.dump(m, open("dist/bridge.json", "w"), ensure_ascii=False, indent=2)
