@@ -1,5 +1,7 @@
-# OTA 용 파티션 (4MB 플래시). ota_0/ota_1 두 슬롯에 번갈아 기록, otadata 로 부팅 슬롯·롤백 상태 관리
-# dspfw: 메인보드(F2808) 펌웨어 스테이징 (서버에서 받아 두었다가 적용). 파티션 변경은 USB 로만 반영됨
+# OTA 용 파티션 (16MB 플래시, ESP32-S3 N16). ota_0/ota_1 두 슬롯에 번갈아 기록, otadata 로 부팅 슬롯·롤백 상태 관리
+# dspfw : 메인보드(F2808) 펌웨어 스테이징 (서버에서 받아 두었다가 적용)
+# dsppkg: 메인보드에 굽는 프로그램의 패키지(.dsppkg = .dspfw+.out+.map) 보관, 슬롯 2개 × 6MB (0.9.0~)
+# 파티션 변경은 USB 로만 반영됨. 0.9.0 은 기존 항목을 그대로 두고 dsppkg 만 뒤에 추가 → 표 + 앱만 다시 구우면 설정 유지
 # Name,     Type, SubType, Offset,   Size,     Flags
 nvs,        data, nvs,     0x9000,   0x6000,
 otadata,    data, ota,     0xf000,   0x2000,
@@ -7,3 +9,4 @@ phy_init,   data, phy,     0x11000,  0x1000,
 ota_0,      app,  ota_0,   0x20000,  0x1C0000,
 ota_1,      app,  ota_1,   0x1E0000, 0x1C0000,
 dspfw,      data, 0x40,    0x3A0000, 0x60000,
+dsppkg,     data, 0x41,    0x400000, 0xC00000,

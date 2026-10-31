@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
-typedef struct { uint32_t size; } esp_partition_t;
+typedef struct { uint32_t size; const char *label; } esp_partition_t;
 #define ESP_PARTITION_TYPE_DATA 1
 #define ESP_PARTITION_SUBTYPE_ANY 0xff
 const esp_partition_t *esp_partition_find_first(int t, int st, const char *label);

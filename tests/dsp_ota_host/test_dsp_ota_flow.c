@@ -1,10 +1,12 @@
 // main/dsp_ota.c 흐름 시험 (호스트): dsp_ota.c 를 그대로 포함하고 ESP-IDF·UART·HTTP·파티션을 가짜로 바꾼다.
 // 메인보드 쪽은 실제 부트로더 프로토콜 처리기(dsp/common/bootproto.c)와 RAM 플래시, 간단한 앱 응답기로 흉내 낸다.
+// 패키지 보관(dsp_pkg.c)은 그대로 링크하고 dsppkg 파티션(12MB RAM, NOR 처럼 쓰기는 1→0 만)·SHA-256(sha256_host.c)을 붙인다.
 //   ./run.sh
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../../main/dsp_ota.c"
+#include "psa/crypto.h"
 
 int g_verbose;
 app_cfg_t g_cfg;
@@ -50,18 +52,34 @@ static int count_rep(const char *sub)
     return c;
 }
 
-// ───────── 스테이징 파티션 (RAM) ─────────
+// ───────── 스테이징·패키지 파티션 (RAM) ─────────
 
 #define PART_SIZE 0x60000
+#define PKG_PART_SIZE 0xC00000
 static uint8_t m_part[PART_SIZE];
-static esp_partition_t m_p = { PART_SIZE };
-const esp_partition_t *esp_partition_find_first(int t, int st, const char *l) { return &m_p; }
+static uint8_t m_pkgp[PKG_PART_SIZE];
+static esp_partition_t m_p = { PART_SIZE, "dspfw" };
+static esp_partition_t m_pp = { PKG_PART_SIZE, "dsppkg" };
+static bool m_pkg_missing;          // 이전 파티션 표 (dsppkg 없음)
+static int m_pkg_erases;            // dsppkg 지우기 횟수 (4KB 단위인지)
+const esp_partition_t *esp_partition_find_first(int t, int st, const char *l)
+{ return strcmp(l, "dsppkg") == 0 ? (m_pkg_missing ? NULL : &m_pp) : &m_p; }
+static uint8_t *pmem(const esp_partition_t *p) { return p == &m_pp ? m_pkgp : m_part; }
 esp_err_t esp_partition_read(const esp_partition_t *p, size_t off, void *d, size_t n)
-{ if (off + n > PART_SIZE) return ESP_FAIL; memcpy(d, m_part + off, n); return ESP_OK; }
+{ if (off + n > p->size) return ESP_FAIL; memcpy(d, pmem(p) + off, n); return ESP_OK; }
 esp_err_t esp_partition_write(const esp_partition_t *p, size_t off, const void *s, size_t n)
-{ if (off + n > PART_SIZE) return ESP_FAIL; memcpy(m_part + off, s, n); return ESP_OK; }
+{
+    if (off + n > p->size) return ESP_FAIL;
+    for (size_t i = 0; i < n; i++) pmem(p)[off + i] &= ((const uint8_t *)s)[i];     // NOR: 1→0 만
+    return ESP_OK;
+}
 esp_err_t esp_partition_erase_range(const esp_partition_t *p, size_t off, size_t n)
-{ if (off + n > PART_SIZE) return ESP_FAIL; memset(m_part + off, 0xFF, n); return ESP_OK; }
+{
+    if (off + n > p->size || off % 4096 || n % 4096) return ESP_FAIL;
+    if (p == &m_pp) { m_pkg_erases++; if (n != 4096) return ESP_FAIL; }      // 한 번에 4KB 만 (캐시 정지 시간)
+    memset(pmem(p) + off, 0xFF, n);
+    return ESP_OK;
+}
 
 // ───────── 메인보드 흉내: 앱 + 부트로더(bootproto.c) ─────────
 
@@ -177,17 +195,30 @@ int uart_bridge_raw_read(uint8_t *b, size_t n, uint32_t to)
 
 // ───────── 가짜 HTTP ─────────
 
-static const uint8_t *m_http_body;
+static const uint8_t *m_http_body;     // .dspfw
 static uint32_t m_http_len, m_http_pos;
+static const uint8_t *m_pkg_body;      // .dsppkg (URL 에 .dsppkg 가 들어간 요청)
+static uint32_t m_pkg_len;
+static int64_t m_pkg_clen = -1;        // >= 0 이면 패키지 Content-Length 를 이 값으로 (크기 불일치 흉내)
+static const uint8_t *m_cur_body;
+static uint32_t m_cur_len;
+static bool m_cur_pkg;
 static char m_http_url[256];
 static const char *m_redirect_to;   // 첫 요청을 302 로 이 URL 에 보냄
 static bool m_redirected;
-static int m_http_inits;
+static int m_http_inits;            // .dspfw 요청 수
+static int m_pkg_inits;             // 패키지 요청 수
 static void (*m_on_http_read)(void);    // HTTP 읽기 때 1회 불림 (받는 중 서버 재전송 흉내)
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c)
-{ m_http_inits++; strncpy(m_http_url, c->url, sizeof(m_http_url) - 1); m_http_pos = 0; m_redirected = false; return (esp_http_client_handle_t)1; }
+{
+    m_cur_pkg = strstr(c->url, ".dsppkg") != NULL;
+    if (m_cur_pkg) { m_pkg_inits++; m_cur_body = m_pkg_body; m_cur_len = m_pkg_len; }
+    else { m_http_inits++; m_cur_body = m_http_body; m_cur_len = m_http_len; }
+    strncpy(m_http_url, c->url, sizeof(m_http_url) - 1); m_http_pos = 0; m_redirected = false; return (esp_http_client_handle_t)1;
+}
 esp_err_t esp_http_client_open(esp_http_client_handle_t h, int w) { m_http_pos = 0; return ESP_OK; }
-int64_t esp_http_client_fetch_headers(esp_http_client_handle_t h) { return m_redirect_to && !m_redirected ? 0 : m_http_len; }
+int64_t esp_http_client_fetch_headers(esp_http_client_handle_t h)
+{ return m_redirect_to && !m_redirected ? 0 : (m_cur_pkg && m_pkg_clen >= 0 ? m_pkg_clen : m_cur_len); }
 int esp_http_client_get_status_code(esp_http_client_handle_t h) { return m_redirect_to && !m_redirected ? 302 : 200; }
 esp_err_t esp_http_client_set_redirection(esp_http_client_handle_t h)
 { strncpy(m_http_url, m_redirect_to, sizeof(m_http_url) - 1); m_redirected = true; return ESP_OK; }
@@ -198,10 +229,10 @@ esp_err_t esp_http_client_get_url(esp_http_client_handle_t h, char *u, const int
 int esp_http_client_read(esp_http_client_handle_t h, char *b, int len)
 {
     if (m_on_http_read) { void (*f)(void) = m_on_http_read; m_on_http_read = NULL; f(); }
-    uint32_t n = m_http_len - m_http_pos;
+    uint32_t n = m_cur_len - m_http_pos;
     if (n > 1000) n = 1000;             // 작은 조각으로 (머리 검사가 여러 조각을 모으는지)
     if ((uint32_t)len < n) n = (uint32_t)len;
-    memcpy(b, m_http_body + m_http_pos, n);
+    memcpy(b, m_cur_body + m_http_pos, n);
     m_http_pos += n;
     return (int)n;
 }
@@ -211,6 +242,7 @@ int esp_http_client_read(esp_http_client_handle_t h, char *b, int len)
 static uint8_t m_img[200000];
 static void p16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 static void p32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+#define p32_ p32
 
 // block_words: 블록 크기 (정상 128), fver: 파일 헤더 버전 (NULL = ver)
 static uint32_t mkimg(const char *ver, const char *fver, uint32_t app_len, int block_words)
@@ -244,17 +276,79 @@ static uint32_t mkimg(const char *ver, const char *fver, uint32_t app_len, int b
     return pos;
 }
 
-// 다운로드 없이 파티션에 직접 스테이징 (구 펌웨어가 받아 둔 이미지 흉내)
-static void stage_raw(uint32_t len, uint32_t job)
+// ───────── 패키지 (.dsppkg 바이트 — 브리지는 풀지 않으므로 내용은 아무 바이트) ─────────
+
+extern int g_psa_open;
+static uint8_t m_pkg[40000];
+static char m_pkg_sha_hex[65], m_pkg_id[17];
+static uint8_t m_pkg_sha[32];
+
+static void sha256(const uint8_t *d, size_t n, uint8_t out[32])
+{
+    psa_hash_operation_t op = psa_hash_operation_init();
+    size_t l;
+    psa_hash_setup(&op, PSA_ALG_SHA_256);
+    psa_hash_update(&op, d, n);
+    psa_hash_finish(&op, out, 32, &l);
+}
+
+// 패키지 바이트·sha256·ID 를 seed 로 만든다
+static uint32_t mkpkg(uint32_t len, int seed)
+{
+    for (uint32_t i = 0; i < len; i++) m_pkg[i] = (uint8_t)(i * 31 + seed * 7 + (i >> 9));
+    sha256(m_pkg, len, m_pkg_sha);
+    for (int i = 0; i < 32; i++) sprintf(m_pkg_sha_hex + i * 2, "%02x", m_pkg_sha[i]);
+    snprintf(m_pkg_id, sizeof(m_pkg_id), "%.16s", m_pkg_sha_hex + 20);
+    m_pkg_body = m_pkg; m_pkg_len = len;
+    return len;
+}
+
+// 실제 기록 경로(dsp_pkg_begin…finalize)로 짝 패키지를 넣는다
+static void pkg_put(uint32_t job, uint32_t dspfw_crc, const char *ver)
+{
+    static uint8_t tmp[1000];
+    if (!m_pkg_len) mkpkg(5000, 1);
+    const char *e = dsp_pkg_begin(m_pkg_len, job, m_pkg_id, m_pkg_sha);
+    for (uint32_t o = 0; !e && o < m_pkg_len; o += sizeof(tmp)) {
+        uint32_t n = m_pkg_len - o < sizeof(tmp) ? m_pkg_len - o : (uint32_t)sizeof(tmp);
+        memcpy(tmp, m_pkg + o, n);
+        e = dsp_pkg_write(tmp, n);
+    }
+    if (!e) e = dsp_pkg_end();
+    if (!e) e = dsp_pkg_finalize(dspfw_crc, ver);
+    if (e) { printf("pkg_put: %s\n", e); s_fail++; }
+}
+
+// 규격 배치(LE 128 B 머리, 오프셋은 규격 표 그대로)로 슬롯 머리를 직접 쓴다 — USB 도구가 쓰는 슬롯 흉내
+static void pkg_hdr_raw(int slot, uint32_t flags, uint32_t seq, uint32_t job, uint32_t crc, const char *id, const char *ver)
+{
+    uint8_t *b = m_pkgp + (size_t)slot * 0x600000;
+    memset(b, 0xFF, 4096);
+    memcpy(b, "DSPPKG1", 8);
+    p32_(b + 8, flags); p32_(b + 12, seq); p32_(b + 16, m_pkg_len); p32_(b + 20, job); p32_(b + 24, crc);
+    memset(b + 28, 0, 17); memcpy(b + 28, id, 16);
+    memset(b + 45, 0, 16); memcpy(b + 45, ver, strlen(ver));
+    memcpy(b + 61, m_pkg_sha, 32);
+    memset(b + 0x1000, 0xFF, m_pkg_len);
+    memcpy(b + 0x1000, m_pkg, m_pkg_len);
+}
+static uint32_t pkg_flags(int slot) { return get32(m_pkgp + (size_t)slot * 0x600000 + 8); }
+
+static uint32_t img_crc(void) { return get32(m_img + 12); }
+
+// 다운로드 없이 파티션에 직접 스테이징 (USB 도구·구 펌웨어가 받아 둔 이미지 흉내). pkg = 짝 패키지도 넣음
+static void stage_raw_ex(uint32_t len, uint32_t job, bool pkg)
 {
     memset(m_part, 0xFF, sizeof(m_part));
     memcpy(m_part + STAGE_HDR_LEN, m_img, len);
-    stage_hdr_t sh = { .job = job, .file_len = len };
+    stage_hdr_t sh = { .job = job, .file_len = len, .file_crc = img_crc() };
     memcpy(sh.magic, STAGE_MAGIC, 8);
     memcpy(sh.ver, m_img + 16, 15);
     memcpy(m_part, &sh, sizeof(sh));
     stage_load();
+    if (pkg && dap_ver_valid(s_stage.ver)) pkg_put(job, img_crc(), s_stage.ver);    // 결함 이미지 시험은 패키지 없이
 }
+static void stage_raw(uint32_t len, uint32_t job) { stage_raw_ex(len, job, true); }
 
 static void reset_board(app_mode_t app, const char *ver)
 {
@@ -274,6 +368,7 @@ static const char *do_download(const char *url, uint32_t len, uint32_t job)
     cmd_t c = { .type = CMD_START, .job = job };
     strlcpy(c.url, url, sizeof(c.url));
     m_http_body = m_img; m_http_len = len;
+    s_dl.base = 0; s_dl.last_pct = -1;
     const char *err = download(&c);
     if (err) stage_load();
     return err;
@@ -491,10 +586,20 @@ static void t_alive_check(void)
     CHECK(m_raw_begins == 1 && count_rep("\"wait_power\"") >= 1 && m_hellos > RETRIES);
 }
 
+#define PKG_URL "http://192.168.0.10:8080/fw/20261011-000000-abcdef/app.dsppkg"
+static char m_pkgjs[400];
+// START 의 pkg_* 필드 (",..." 형태, 앞에 쉼표)
+static const char *pkg_fields(void)
+{
+    snprintf(m_pkgjs, sizeof(m_pkgjs), ",\"pkg_url\":\"%s\",\"pkg_size\":%u,\"pkg_sha256\":\"%s\",\"pkg_id\":\"%s\"",
+             PKG_URL, m_pkg_len, m_pkg_sha_hex, m_pkg_id);
+    return m_pkgjs;
+}
+
 static void t_start_cmd(void)
 {
     printf("-- DSP_OTA_START 검사 (C-09 / 결정 11)\n");
-    char js[400], url[300];
+    char js[800], url[300];
     memset(url, 'a', sizeof(url));
     memcpy(url, "http://192.168.0.10:8080/fw/", 28);
     url[250] = 0;
@@ -503,9 +608,11 @@ static void t_start_cmd(void)
     dsp_ota_start(js, strlen(js));
     CHECK(m_queued == 0 && count_rep("\"err\":\"url_too_long\"") == FINAL_REPORTS && count_rep("\"job\":50") == FINAL_REPORTS);
     url[199] = 0;                                   // 정확히 199자 → 통과
-    snprintf(js, sizeof(js), "{\"job\":51,\"url\":\"%s\",\"recover\":1}", url);
+    snprintf(js, sizeof(js), "{\"job\":51,\"url\":\"%s\",\"recover\":1%s}", url, pkg_fields());
     dsp_ota_start(js, strlen(js));
     CHECK(m_queued == 1 && strcmp(m_last_cmd.url, url) == 0 && m_last_cmd.recover);
+    CHECK(strcmp(m_last_cmd.pkg_url, PKG_URL) == 0 && m_last_cmd.pkg_size == m_pkg_len && strcmp(m_last_cmd.pkg_id, m_pkg_id) == 0 &&
+          memcmp(m_last_cmd.pkg_sha, m_pkg_sha, 32) == 0);
     snprintf(js, sizeof(js), "{\"job\":52,\"url\":\"http://192.168.0.11:8080/fw/a/b.dspfw\"}");
     m_nrep = 0;
     dsp_ota_start(js, strlen(js));
@@ -533,7 +640,7 @@ static void run_cmd(const cmd_t *in)
     s_cur_start = 0;
 }
 
-static char m_js_start[300], m_js_apply[100];
+static char m_js_start[800], m_js_apply[100];
 static int m_q_in_hook;
 static void dup_start_hook(void) { int q = m_queued; dsp_ota_start(m_js_start, strlen(m_js_start)); m_q_in_hook = m_queued - q; }
 static void dup_apply_hook(void) { int q = m_queued; dsp_ota_apply(m_js_apply, strlen(m_js_apply)); m_q_in_hook = m_queued - q; }
@@ -541,7 +648,7 @@ static void dup_apply_hook(void) { int q = m_queued; dsp_ota_apply(m_js_apply, s
 // 서버 명령 → 큐에 들어가면 처리. 큐에 들어갔으면 true
 static bool server_start(uint32_t job, int apply)
 {
-    snprintf(m_js_start, sizeof(m_js_start), "{\"job\":%u,\"url\":\"%s\",\"apply\":%d}", job, URL, apply);
+    snprintf(m_js_start, sizeof(m_js_start), "{\"job\":%u,\"url\":\"%s\",\"size\":%u,\"apply\":%d%s}", job, URL, m_http_len, apply, pkg_fields());
     int q = m_queued;
     dsp_ota_start(m_js_start, strlen(m_js_start));
     if (m_queued == q) return false;
@@ -653,6 +760,285 @@ static void t_duplicate(void)
     m_http_body = NULL; m_http_len = 0;
 }
 
+// ───────── 패키지 보관 (dsppkg, 0.9.0) ─────────
+
+static int pkg_slot_of(const char *id)
+{
+    for (int i = 0; i < 2; i++) if (dsp_pkg_slot(i)->st != DSP_PKG_EMPTY && strcmp(dsp_pkg_slot(i)->id, id) == 0) return i;
+    return -1;
+}
+
+static void pkg_wipe(void)
+{
+    memset(m_pkgp, 0xFF, sizeof(m_pkgp));
+    m_pkg_missing = false;
+    CHECK(dsp_pkg_init());
+}
+
+// download 보고의 pct 가 늘기만 하고 100 으로 끝나는지, 앞쪽(패키지 단계)에도 보고가 있는지
+static bool pct_monotonic(uint32_t job, int *count, int *first)
+{
+    char key[48];
+    int last = -1, c = 0;
+    snprintf(key, sizeof(key), "\"job\":%u,\"stage\":\"download\",\"pct\":", job);
+    for (int i = 0; i < m_nrep; i++) {
+        const char *p = strstr(m_rep[i], key);
+        if (!p) continue;
+        int v = atoi(p + strlen(key));
+        if (c == 0 && first) *first = v;
+        if (v <= last) return false;
+        last = v; c++;
+    }
+    if (count) *count = c;
+    return last == 100;
+}
+
+static void t_pkg_start(void)
+{
+    printf("-- 패키지: START 검사·받기 (no_pkg / pkg_sha / pkg_size / 짝 확정 / pct)\n");
+    uint32_t n = mkimg("1.3.0", NULL, 3000, 128);
+    reset_board(APP_OK, "1.2.4");
+    pkg_wipe();
+    mkpkg(5000, 2);
+    stage_raw(n, 90);                                   // 기존 스테이징 + 짝 패키지
+    s_state = ST_STAGED;
+    memset(&s_recent, 0, sizeof(s_recent));
+    static uint8_t snap[PART_SIZE];
+    memcpy(snap, m_part, sizeof(snap));
+    int pi = m_pkg_inits, hi = m_http_inits;
+    char js[900];
+
+    // 1. pkg_* 없음 / 형식 오류 → no_pkg, 큐에 넣지 않음, 기존 스테이징·패키지 그대로
+    const char *bad[] = {
+        "",                                                                                   // 0.6.x 게이트웨이
+        ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":5000,\"pkg_id\":\"0123456789abcdef\"",      // sha 없음
+        ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789ABCDEF\"",   // 대문자 ID
+        ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcde\"",    // 15자
+        ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":0,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"",      // 크기 0
+        ",\"pkg_url\":\"ftp://x/a.dsppkg\",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"",
+        ",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"",                                 // url 없음
+    };
+    char upper[65];
+    for (size_t k = 0; k <= sizeof(bad) / sizeof(bad[0]); k++) {
+        char f[400];
+        if (k < sizeof(bad) / sizeof(bad[0])) {
+            snprintf(f, sizeof(f), bad[k], m_pkg_sha_hex);
+        } else {                                        // sha 대문자
+            for (int i = 0; i < 64; i++) upper[i] = (char)(m_pkg_sha_hex[i] >= 'a' ? m_pkg_sha_hex[i] - 32 : m_pkg_sha_hex[i]);
+            upper[64] = 0;
+            snprintf(f, sizeof(f), ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"%s\"", upper, m_pkg_id);
+        }
+        snprintf(js, sizeof(js), "{\"job\":91,\"url\":\"%s\"%s}", URL, f);
+        m_nrep = 0; m_queued = 0;
+        dsp_ota_start(js, strlen(js));
+        CHECK(m_queued == 0 && count_rep("\"job\":91,\"stage\":\"fail\",\"err\":\"no_pkg\"") == FINAL_REPORTS && m_nrep == FINAL_REPORTS);
+    }
+    // 크기 초과 · URL 호스트 · URL 길이
+    struct { const char *f; const char *err; } cases[] = {
+        { ",\"pkg_url\":\"" PKG_URL "\",\"pkg_size\":6287361,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"", "pkg_too_big" },
+        { ",\"pkg_url\":\"http://10.0.0.1/a.dsppkg\",\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"", "pkg_url_host" },
+        { ",\"pkg_url\":\"http://192.168.0.10/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dsppkg\","
+          "\"pkg_size\":5000,\"pkg_sha256\":\"%s\",\"pkg_id\":\"0123456789abcdef\"", "pkg_url_too_long" },
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        char f[500], want[80];
+        snprintf(f, sizeof(f), cases[k].f, m_pkg_sha_hex);
+        snprintf(js, sizeof(js), "{\"job\":92,\"url\":\"%s\"%s}", URL, f);
+        snprintf(want, sizeof(want), "\"err\":\"%s\"", cases[k].err);
+        m_nrep = 0; m_queued = 0;
+        dsp_ota_start(js, strlen(js));
+        CHECK(m_queued == 0 && count_rep(want) == FINAL_REPORTS);
+    }
+    CHECK(memcmp(snap, m_part, sizeof(snap)) == 0 && s_stage.job == 90 && m_pkg_inits == pi && m_http_inits == hi);
+    CHECK(dsp_pkg_find_staged(img_crc()) >= 0);
+
+    // 2. 패키지 해시 불일치 → pkg_sha: .dspfw 는 받지 않음, 기존 스테이징 그대로, 기록하던 슬롯은 빈 슬롯
+    n = mkimg("1.3.1", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = n;
+    mkpkg(40000, 3);
+    m_pkg[12345] ^= 0x40;                               // 서버가 알려준 sha256 과 다른 내용
+    m_nrep = 0;
+    CHECK(server_start(93, 0));
+    CHECK(count_rep("\"job\":93,\"stage\":\"fail\",\"err\":\"pkg_sha\"") == FINAL_REPORTS);
+    CHECK(m_pkg_inits == pi + 1 && m_http_inits == hi && s_stage.job == 90 && s_state == ST_STAGED);
+    CHECK(memcmp(snap, m_part, sizeof(snap)) == 0 && g_psa_open == 0);
+    CHECK(pkg_slot_of(m_pkg_id) < 0);
+    // 크기 불일치 (Content-Length ≠ pkg_size) → pkg_size
+    mkpkg(40000, 3);
+    m_pkg_clen = 39999; m_nrep = 0;
+    CHECK(server_start(94, 0));
+    m_pkg_clen = -1;
+    CHECK(count_rep("\"job\":94,\"stage\":\"fail\",\"err\":\"pkg_size\"") == FINAL_REPORTS && s_stage.job == 90 && g_psa_open == 0);
+    // .dspfw 받기 실패 (패키지는 받음) → 패키지 슬롯 확정 안 됨 (bit0=1 → 무시)
+    uint32_t badn = mkimg("2026.10.11", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = badn; m_nrep = 0;
+    CHECK(server_start(95, 0));
+    CHECK(count_rep("\"job\":95,\"stage\":\"fail\",\"err\":\"ver_invalid\"") == FINAL_REPORTS && pkg_slot_of(m_pkg_id) < 0);
+
+    // 3. 정상: 패키지 → .dspfw, 슬롯 STAGED + 짝(.dspfw 파일 CRC), pct 는 합계 기준으로 늘기만
+    n = mkimg("1.3.1", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = n;
+    m_nrep = 0; m_pkg_erases = 0;
+    CHECK(server_start(96, 0));
+    CHECK(count_rep("\"job\":96,\"stage\":\"staged\",\"pct\":100,\"ver\":\"1.3.1\"") == FINAL_REPORTS);
+    int cnt = 0, first = -1;
+    CHECK(pct_monotonic(96, &cnt, &first) && cnt >= 4 && first < 100);    // 패키지(40000 B) 단계에서 20·40·60·80
+    int sl = pkg_slot_of(m_pkg_id);
+    CHECK(sl >= 0 && dsp_pkg_slot(sl)->st == DSP_PKG_STAGED && dsp_pkg_slot(sl)->dspfw_crc == s_stage.file_crc &&
+          s_stage.file_crc == img_crc() && dsp_pkg_slot(sl)->job == 96 && strcmp(dsp_pkg_slot(sl)->ver, "1.3.1") == 0);
+    CHECK(m_pkg_erases == 1 + (40000 + 4095) / 4096);  // 머리 섹터 + 패키지 섹터, 4KB 씩
+    const uint8_t *h = m_pkgp + (size_t)sl * 0x600000;   // 규격 배치 그대로
+    CHECK(memcmp(h, "DSPPKG1\0", 8) == 0 && get32(h + 8) == 0xFFFFFFFE && get32(h + 16) == 40000 && get32(h + 20) == 96 &&
+          get32(h + 24) == img_crc() && memcmp(h + 28, m_pkg_id, 17) == 0 && strcmp((const char *)h + 45, "1.3.1") == 0 &&
+          memcmp(h + 61, m_pkg_sha, 32) == 0 && h[93] == 0xFF && h[127] == 0xFF && h[128] == 0xFF);
+    CHECK(memcmp(h + 0x1000, m_pkg, 40000) == 0 && g_psa_open == 0);
+    char b[600], want[120];
+    dsp_ota_status_json(b, sizeof(b));
+    snprintf(want, sizeof(want), "\"staged\":{\"job\":96,\"ver\":\"1.3.1\",\"pkg\":\"%s\"},\"pkg_st\":\"ok\"", m_pkg_id);
+    CHECK(strstr(b, want) != NULL);
+    dsp_ota_format(b, sizeof(b));
+    snprintf(want, sizeof(want), "staged_pkg=%s\n", m_pkg_id);
+    CHECK(strstr(b, want) != NULL);
+    // 같은 job 의 중복 START → 패키지도 다시 받지 않음
+    pi = m_pkg_inits; m_nrep = 0;
+    CHECK(server_start(96, 0));
+    CHECK(m_pkg_inits == pi && count_rep("\"job\":96,\"stage\":\"staged\"") == FINAL_REPORTS);
+}
+
+static void t_pkg_apply(void)
+{
+    printf("-- 패키지: 적용 전 짝 확인 / APPLIED·OLD / 전원 차단 뒤 seq\n");
+    uint32_t n = mkimg("1.4.0", NULL, 3000, 128);
+    char b[600], want[120];
+
+    // 1. 짝 패키지 없음 → no_pkg, 메인보드 그대로
+    reset_board(APP_OK, "1.3.1");
+    pkg_wipe();
+    stage_raw_ex(n, 100, false);
+    const char *e = apply(100, false);
+    CHECK(e && strcmp(e, "no_pkg") == 0 && m_raw_begins == 0 && s_flash_untouched() && s_stage.magic[0]);
+    m_nrep = 0;
+    CHECK(server_apply(100));
+    CHECK(count_rep("\"job\":100,\"stage\":\"fail\",\"ver\":\"1.4.0\",\"err\":\"no_pkg\"") == FINAL_REPORTS && s_flash_untouched());
+    //    다른 이미지의 패키지만 있음 (dspfw_crc 다름) → no_pkg
+    mkpkg(3000, 4);
+    pkg_put(100, img_crc() ^ 1, "1.4.0");
+    reset_board(APP_OK, "1.3.1");
+    e = apply(100, false);
+    CHECK(e && strcmp(e, "no_pkg") == 0 && m_raw_begins == 0 && s_flash_untouched());
+    //    짝은 있으나 flash 의 패키지 바이트가 손상 → no_pkg (sha256 재계산)
+    pkg_wipe();
+    stage_raw(n, 101);
+    int sl = dsp_pkg_find_staged(img_crc());
+    CHECK(sl >= 0);
+    uint8_t *pb = m_pkgp + (size_t)sl * 0x600000 + 0x1000 + 777;
+    while (!(*pb & 0x80)) pb++;
+    *pb &= 0x7F;                                        // NOR 처럼 1→0 (실제로 바뀌는 바이트)
+    reset_board(APP_OK, "1.3.1");
+    e = apply(101, false);
+    CHECK(e && strcmp(e, "no_pkg") == 0 && m_raw_begins == 0 && s_flash_untouched() && g_psa_open == 0);
+    CHECK(dsp_pkg_slot(sl)->st == DSP_PKG_STAGED);
+
+    // 2. 적용 성공 → APPLIED. 다음 적용 → 새 슬롯 APPLIED, 이전 슬롯 OLD
+    pkg_wipe();
+    mkpkg(3000, 5);
+    char id_a[17];
+    strcpy(id_a, m_pkg_id);
+    stage_raw(n, 102);
+    int a = pkg_slot_of(id_a);
+    reset_board(APP_OK, "1.3.1");
+    CHECK(apply(102, false) == NULL && strcmp(s_dsp_ver, "1.4.0") == 0);
+    CHECK(a == 0 && dsp_pkg_slot(a)->st == DSP_PKG_APPLIED && dsp_pkg_current() == a && pkg_flags(a) == 0xFFFFFFFC);
+    dsp_ota_status_json(b, sizeof(b));
+    snprintf(want, sizeof(want), "\"staged\":null,\"pkg_st\":\"ok\",\"dsp_pkg\":{\"id\":\"%s\",\"ver\":\"1.4.0\"}", id_a);
+    CHECK(strstr(b, want) != NULL);
+    dsp_ota_format_json(b, sizeof(b));
+    snprintf(want, sizeof(want), "\"pkg_st\":\"ok\",\"pkg\":{\"id\":\"%s\",\"ver\":\"1.4.0\"}}", id_a);
+    CHECK(strstr(b, want) != NULL);
+    dsp_ota_format(b, sizeof(b));
+    snprintf(want, sizeof(want), "pkg=%s(1.4.0) staged_pkg=-\n", id_a);
+    CHECK(strstr(b, want) != NULL);
+
+    n = mkimg("1.4.1", NULL, 3000, 128);
+    mkpkg(4000, 6);
+    char id_b[17];
+    strcpy(id_b, m_pkg_id);
+    stage_raw(n, 103);                                  // APPLIED 가 아닌 슬롯 1 로
+    CHECK(pkg_slot_of(id_b) == 1 && dsp_pkg_slot(1)->seq == dsp_pkg_slot(0)->seq + 1);
+    dsp_ota_pkg_format(b, sizeof(b));
+    CHECK(strstr(b, "pkg slot0: APPLIED") && strstr(b, "pkg slot1: STAGED") && strstr(b, "<- staged") && strstr(b, "job=103"));
+    reset_board(APP_OK, "1.4.0");
+    CHECK(apply(103, false) == NULL && strcmp(s_dsp_ver, "1.4.1") == 0);
+    CHECK(dsp_pkg_current() == 1 && dsp_pkg_slot(0)->st == DSP_PKG_OLD && pkg_flags(0) == 0xFFFFFFF8 && pkg_flags(1) == 0xFFFFFFFC);
+    //    적용 실패 → 슬롯 STAGED 그대로
+    n = mkimg("1.4.2", NULL, 3000, 128);
+    mkpkg(3500, 7);
+    stage_raw(n, 104);
+    CHECK(pkg_slot_of(m_pkg_id) == 0);                  // 현재 APPLIED(1) 가 아닌 쪽 (OLD 를 덮어씀)
+    reset_board(APP_NG, "1.4.1");
+    e = apply(104, false);
+    CHECK(e && strcmp(e, "app_ng_01") == 0 && dsp_pkg_slot(0)->st == DSP_PKG_STAGED && dsp_pkg_current() == 1);
+    //    START apply:1 로 받고 바로 적용
+    n = mkimg("1.4.3", NULL, 3000, 128);
+    m_http_body = m_img; m_http_len = n;
+    mkpkg(9000, 8);
+    reset_board(APP_OK, "1.4.1");
+    memset(&s_recent, 0, sizeof(s_recent));
+    CHECK(server_start(105, 1));
+    CHECK(count_rep("\"job\":105,\"stage\":\"done\",\"pct\":100,\"ver\":\"1.4.3\"") == FINAL_REPORTS);
+    CHECK(dsp_pkg_current() == 0 && strcmp(dsp_pkg_slot(0)->id, m_pkg_id) == 0 && dsp_pkg_slot(1)->st == DSP_PKG_OLD);
+
+    // 3. 전원 차단으로 두 슬롯이 모두 APPLIED → seq 큰 쪽이 현재, 새 패키지는 작은 쪽에, 적용하면 큰 쪽을 OLD 로 표시
+    pkg_wipe();
+    mkpkg(2000, 9);
+    pkg_hdr_raw(0, 0xFFFFFFFC, 6, 7, 0x1111, "aaaaaaaaaaaaaaaa", "2.0");
+    pkg_hdr_raw(1, 0xFFFFFFFC, 5, 8, 0x2222, "bbbbbbbbbbbbbbbb", "1.9");
+    CHECK(dsp_pkg_init());
+    CHECK(dsp_pkg_current() == 0 && dsp_pkg_slot(1)->st == DSP_PKG_OLD);
+    pkg_hdr_raw(0, 0xFFFFFFFC, 5, 7, 0x1111, "aaaaaaaaaaaaaaaa", "2.0");
+    pkg_hdr_raw(1, 0xFFFFFFFC, 9, 8, 0x2222, "bbbbbbbbbbbbbbbb", "1.9");
+    CHECK(dsp_pkg_init());
+    CHECK(dsp_pkg_current() == 1 && dsp_pkg_slot(0)->st == DSP_PKG_OLD);
+    dsp_ota_status_json(b, sizeof(b));
+    CHECK(strstr(b, "\"dsp_pkg\":{\"id\":\"bbbbbbbbbbbbbbbb\",\"ver\":\"1.9\"}") != NULL);
+    n = mkimg("2.1", NULL, 3000, 128);
+    mkpkg(2500, 10);
+    stage_raw(n, 106);
+    CHECK(pkg_slot_of(m_pkg_id) == 0 && dsp_pkg_slot(0)->seq == 10);
+    reset_board(APP_OK, "1.9");
+    CHECK(apply(106, false) == NULL);
+    CHECK(dsp_pkg_current() == 0 && pkg_flags(1) == 0xFFFFFFF8 && dsp_pkg_slot(1)->st == DSP_PKG_OLD);
+    //    쓰다 만 슬롯 (bit0=1) 은 빈 슬롯
+    pkg_hdr_raw(1, 0xFFFFFFFF, 11, 0, 0x3333, "cccccccccccccccc", "3.0");
+    CHECK(dsp_pkg_init() && dsp_pkg_slot(1)->st == DSP_PKG_EMPTY && dsp_pkg_current() == 0);
+    dsp_ota_pkg_format(b, sizeof(b));
+    CHECK(strstr(b, "pkg slot1: empty") != NULL);
+
+    // 4. dsppkg 파티션 없음 (이전 파티션 표 + OTA 로 받은 0.9.0) → pkg_nopart
+    m_pkg_missing = true;
+    CHECK(!dsp_pkg_init());
+    mkpkg(2000, 11);
+    snprintf(m_js_start, sizeof(m_js_start), "{\"job\":107,\"url\":\"%s\"%s}", URL, pkg_fields());
+    m_nrep = 0; m_queued = 0;
+    dsp_ota_start(m_js_start, strlen(m_js_start));
+    CHECK(m_queued == 0 && count_rep("\"job\":107,\"stage\":\"fail\",\"err\":\"pkg_nopart\"") == FINAL_REPORTS);
+    n = mkimg("2.2", NULL, 3000, 128);
+    reset_board(APP_OK, "2.1");
+    stage_raw_ex(n, 108, false);
+    e = apply(108, false);
+    CHECK(e && strcmp(e, "pkg_nopart") == 0 && m_raw_begins == 0 && s_flash_untouched());
+    dsp_ota_status_json(b, sizeof(b));
+    CHECK(strstr(b, "\"pkg_st\":\"nopart\",\"dsp_pkg\":null") != NULL && strstr(b, "\"staged\":{\"job\":108,\"ver\":\"2.2\"}") != NULL);
+    dsp_ota_format(b, sizeof(b));
+    CHECK(strstr(b, "pkg=nopart staged_pkg=-") != NULL);
+    dsp_ota_pkg_format(b, sizeof(b));
+    CHECK(strstr(b, "nopart") != NULL);
+    pkg_wipe();
+    stage_clear();
+    s_state = ST_IDLE;
+}
+
 static void t_json_safe(void)
 {
     printf("-- 보고·상태 JSON 이스케이프\n");
@@ -672,6 +1058,8 @@ int main(int argc, char **argv)
     const uint8_t ip[4] = { 192, 168, 0, 10 };
     memcpy(&g_cfg.server_ip, ip, 4);
     memset(m_part, 0xFF, sizeof(m_part));
+    memset(m_pkgp, 0xFF, sizeof(m_pkgp));
+    mkpkg(5000, 1);
     CHECK(dsp_ota_init() == ESP_OK);
     t_download();
     t_apply_basic();
@@ -681,6 +1069,8 @@ int main(int argc, char **argv)
     t_alive_check();
     t_start_cmd();
     t_duplicate();
+    t_pkg_start();
+    t_pkg_apply();
     t_json_safe();
     printf(s_fail ? "%d FAILED\n" : "flow: all passed\n", s_fail);
     return s_fail ? 1 : 0;

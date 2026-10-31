@@ -1,6 +1,8 @@
 # AGV Wi-Fi Bridge (ESP32-S3 + BOB-11189)
 
-ZigBee 통신보드 대체용 브리지입니다. 현재 버전 **v0.8.0** (게이트웨이 서버 v0.4.0 과 함께 씁니다. 서버 0.3.x 와는 512바이트까지만 통신됩니다).
+ZigBee 통신보드 대체용 브리지입니다. 현재 버전 **v0.9.0** (게이트웨이 서버 v0.4.0 과 함께 씁니다. 서버 0.3.x 와는 512바이트까지만 통신됩니다. 메인보드 OTA 는 게이트웨이 **0.7.0 이상** 이 필요합니다).
+
+> **보드: ESP32-S3 N16 (플래시 16MB) 전용** — 0.9.0 부터 4MB 보드는 지원하지 않습니다. 메인보드에 굽는 프로그램의 패키지(.dsppkg)를 브리지 flash 에 보관하기 때문입니다 ([메인보드 펌웨어 OTA](#메인보드tms320f2808-펌웨어-ota)).
 
 ```
 RFID 리더 ──RS232──┐                              ┌── UDP 50000 ── 서버(Gateway) ── ACS
@@ -148,7 +150,7 @@ cfg 7 save
 cfg 7 reboot
 ```
 
-명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup [on|off]` | `dsp [ver|apply]` | `help` (`defaults` 는 원격에서 불가)
+명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup [on|off]` | `dsp [ver|apply|pkg]` | `help` (`defaults` 는 원격에서 불가)
 
 - **원격 저장은 확인 대기 상태로 저장됩니다.** 답은 `saved (trial) - 'reboot' to apply. After reboot the bridge needs a server packet within 180 s or it restores the previous config (gateway 0.3.0+ pings automatically)` 입니다.
 - 재부팅 후 180초 안에 서버에서 하향 패킷(PING 등)을 받지 못하면 저장 직전 설정으로 되돌리고 다시 재부팅합니다. SSID·IP·서버 주소를 잘못 넣어도 호기와 연결이 끊긴 채로 남지 않습니다(OTA 롤백과 같은 기준).
@@ -188,7 +190,7 @@ cfg 7 reboot
 
 - 비밀번호 기본값은 `agvsetup` 입니다(전 호기 공통). 바꾸려면 menuconfig 에서 바꿔 직접 빌드합니다. 새로 연결할 때마다 `login` 이 필요합니다.
 - 비밀번호가 틀리면 1초 뒤 `wrong password` 가 옵니다. **같은 연결에서 5번 연속 틀리면** `wrong password - too many failures, disconnecting` 을 보내고 연결을 끊습니다. 다시 접속하면 다시 시도할 수 있습니다.
-- 명령: `login` · `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup [on|off]` · `dsp [ver|apply]` · `help`. 현장 저장이라 즉시 확정됩니다.
+- 명령: `login` · `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup [on|off]` · `dsp [ver|apply|pkg]` · `help`. 현장 저장이라 즉시 확정됩니다.
 - 휴대폰 연결 없이 Wi-Fi 연결 상태로 5분이 지나면 설정 모드가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
 - **BLE 는 설정 모드 동안만 켭니다.** Wi-Fi 와 무선부(2.4GHz)를 나눠 쓰기 때문에, 휴대폰이 연결된 동안에는 Wi-Fi 지연이 늘 수 있습니다. 설정 모드가 닫히면 BT 컨트롤러를 완전히 내려 평상시 성능에는 영향이 없습니다. 운용 중 호기는 **AGV 정지 상태에서** 여세요.
 - ESP32-S3 는 BLE 만 지원합니다. 클래식 블루투스(SPP) 전용 앱으로는 보이지 않습니다.
@@ -242,7 +244,7 @@ cfg 7 reboot
 | `0x30` OTA_START | 서버 → ESP | 펌웨어 URL (ASCII, AGV ID 일치 시만. 호스트 = `server` IP, 255자 이하) |
 | `0x31` OTA_RESULT | ESP → 서버 | JSON: stage(start/progress/done/fail/busy), pct, err — 최종 결과는 3번 |
 | `0x11` INFO_REQ | 서버 → ESP | 없음 — 장치 정보 요청 |
-| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw, part, ota, cfg, setup, up, dsp, dspb, dsp_build, dsp_st, staged |
+| `0x12` INFO | ESP → 서버 | JSON: agv, mac, ip, fw, part, ota, cfg, setup, up, dsp, dspb, dsp_build, dsp_st, staged, pkg_st, dsp_pkg |
 | `0x32` DSP_OTA_START | 서버 → ESP | JSON: url, ver, crc32, size, job, apply, recover — 메인보드 이미지(.dspfw) 스테이징 (AGV ID 일치 시만) |
 | `0x33` DSP_OTA_RESULT | ESP → 서버 | JSON: job, stage(download/staged/start/enter/wait_power/erase/retry/progress/verify/done/fail), pct, ver, err — 최종 결과는 3번 |
 | `0x34` DSP_OTA_APPLY | 서버 → ESP | JSON: job, recover — 스테이징된 이미지를 메인보드에 적용 (AGV ID 일치 시만) |
@@ -250,7 +252,7 @@ cfg 7 reboot
 | `0x41` CFG_RESULT | ESP → 서버 | 명령 결과 텍스트 (seq = 요청 seq) |
 
 - 하향 패킷은 설정된 `server` IP 에서 온 것만 받습니다. 서버 하향 패킷을 처음 받는 순간 새 펌웨어와 원격 변경 설정이 확정(롤백 취소)됩니다.
-- STATUS JSON 에 `mac`(STA MAC, INFO 와 같은 소문자 `xx:xx:xx:xx:xx:xx`), `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `setup`(무선 설정 모드 1/0), `dsp`/`dspb`/`dsp_build`(메인보드 앱·부트로더 버전·빌드일), `dsp_st`(idle/downloading/staged/programming/nopart), `staged`(대기 중 이미지 {job, ver} 또는 null) 가 포함됩니다.
+- STATUS JSON 에 `mac`(STA MAC, INFO 와 같은 소문자 `xx:xx:xx:xx:xx:xx`), `part`(실행 슬롯), `ota`(pending/valid/busy), `cfg`(saved/trial/default), `setup`(무선 설정 모드 1/0), `dsp`/`dspb`/`dsp_build`(메인보드 앱·부트로더 버전·빌드일), `dsp_st`(idle/downloading/staged/programming/nopart), `staged`(대기 중 이미지 {job, ver, pkg} 또는 null — `pkg` 는 짝 패키지 ID, 있을 때만), `pkg_st`(ok/nopart = dsppkg 파티션 유무), `dsp_pkg`(메인보드에 적용된 패키지 {id, ver} 또는 null) 가 포함됩니다.
 - 서버는 ESP 가 보낸 패킷의 송신 endpoint(IP:50000)를 기억했다가 그곳으로 하향 송신하면 됩니다. 게이트웨이는 같은 호기 번호가 다른 주소에서 오면 처음 주소를 지키고 충돌로 경고합니다. heartbeat 의 `mac` 이 같은 장치인지 가리는 데 쓰입니다.
 - Wi-Fi 가 끊긴 동안의 상향 프레임은 **버퍼링하지 않고 폐기**합니다. 지난 교통제어 패킷이 늦게 도착하는 것보다 메인보드 재전송이 안전합니다. seq 는 계속 증가하므로 서버에서 누락 구간이 보입니다.
 
@@ -261,24 +263,31 @@ cfg 7 reboot
 현장에서는 게이트웨이 배포 작업으로 올립니다. 기본 방식은 **전 호기 스테이징(주행 중에도 됨) → 적용 대기 → 운용자가 AGV 정지를 확인하고 '적용 시작' → 한 대씩 적용** 입니다 ([DEPLOY.md](https://github.com/Leepy0/AGV_FOTA_GATEWAY/blob/main/docs/DEPLOY.md) 6장).
 
 ```
-dspota 7 stage app_1.2.3.dspfw apply  # (BridgeTest) 스테이징(브리지 dspfw 파티션에 보관) 후 바로 적용 — AGV 정지 상태에서
-                                      #   적용: 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
-info 7                                # 메인보드 앱/부트로더 버전, 스테이징 상태
+dspota 7 stage AGV_Main_1.2.3.dsppkg apply  # (BridgeTest) 패키지 보관 + .dspfw 스테이징 후 바로 적용 — AGV 정지 상태에서
+                                            #   적용: 짝 패키지 확인 → 앱에 진입 요청 → 부트로더 → 지우기·쓰기·검증 → 재부팅 → 버전 확인
+info 7                                      # 메인보드 앱/부트로더 버전, 스테이징·패키지 상태
 ```
 
 - BridgeTest 에서 스테이징만 하고(`apply` 없이) 나중에 `dspota 7 apply`(복구 적용은 `dspota 7 apply recover`)를 보내면, 그 도구로 마지막에 stage 한 job 번호를 그대로 씁니다. BridgeTest 를 다시 띄웠으면 `dspota 7 apply 180145124` 처럼 `info 7` · heartbeat 의 `staged.job` 번호를 끝에 붙입니다. 번호가 다르면 `job_mismatch`, 스테이징된 이미지가 없으면 `not_staged` 로 거부됩니다. 같은 번호로 이미 적용했다면 10분 동안은 그 결과만 다시 옵니다. 실패 뒤 다시 하려면 `dspota 7 stage …` 로 새로 스테이징한 뒤 `apply`(또는 `apply recover`)를 보냅니다. `dsp apply`(브리지 콘솔, 또는 BridgeTest 에서 `cfg 7 dsp apply`)는 job 검사 없이 적용합니다.
-- **배포는 패키지(`.dsppkg` = `.dspfw` + `.out` + `.map` + manifest)로 합니다.** `.out`/`.map` 은 필수입니다 — 원본 소스를 잃어도 복구할 수 있게 하는 재발 방지책입니다. 게이트웨이와 USB 스테이징은 패키지만 받고, 브리지 펌웨어와 `.dspfw` 형식은 그대로입니다.
+- **배포는 패키지(`.dsppkg` = `.dspfw` + `.out` + `.map` + manifest)로 합니다.** `.out`/`.map` 은 필수입니다 — 원본 소스를 잃어도 복구할 수 있게 하는 재발 방지책입니다. 게이트웨이와 USB 스테이징은 패키지만 받습니다. `.dspfw` 형식은 그대로입니다.
   ```
   python tools/dsp_pack.py bundle app.out --map app.map --ver 1.2.3 --hex2000 <hex2000 경로>   # .out 에서 hex2000 으로 .dspfw 를 만들어 묶음 (CCS post-build: dsp/README.md)
   python tools/dsp_pack.py verify AGV_Main_1.2.3.dsppkg                                         # 전체 검증 (info 로 내용 확인)
-  python tools/dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg                                      # 검수용: 게이트웨이 없이 USB 로 브리지 dspfw 파티션에 스테이징 → 콘솔/BLE 에서 dsp apply
+  python tools/dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg                                      # 검수용: 게이트웨이 없이 USB 로 스테이징 + 패키지 보관 → 콘솔/BLE 에서 dsp apply
+  python tools/dsp_pkg_read.py COM5                                                             # 원본 꺼내기: 브리지에 보관된 패키지 → .dsppkg 파일
   ```
   USB 스테이징은 협력사 신규 AGV 검수용입니다 (메인보드에 부트로더가 먼저 있어야 함, 자세한 절차: [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md) 8-5). 패키지 형식: [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md) 3-1절.
+- **패키지 보관 (0.9.0)**: 브리지가 메인보드에 굽는 프로그램은 **짝 패키지가 브리지 flash 에 있어야 합니다** (필수). `dsppkg` 파티션(12MB)에 슬롯 2개(각 6MB, 패키지 최대 6,287,360 B)를 두고, 지금 메인보드에서 도는 것(APPLIED)과 다음 것(STAGED)을 번갈아 보관합니다. 브리지는 ZIP 을 풀지 않고 바이트 그대로 둡니다. 배치·상태 규칙: [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md) 6절.
+  - 스테이징(START): 게이트웨이가 `pkg_url`·`pkg_size`·`pkg_sha256`·`pkg_id` 를 함께 보냅니다(0.7.0+). 브리지는 패키지를 먼저 받아 슬롯에 기록(sha256 확인)하고 이어서 `.dspfw` 를 받습니다. 둘 다 끝나야 패키지 슬롯이 확정됩니다. 진행률(`download` pct)은 둘을 합한 바이트 기준입니다. 0.6.x 게이트웨이는 `pkg_*` 를 보내지 않으므로 `no_pkg` 로 실패합니다.
+  - 적용: 메인보드를 지우기 전에 짝 패키지(스테이징한 `.dspfw` 파일 CRC 와 같은 슬롯)의 sha256 을 flash 에서 다시 계산해 확인합니다. 없거나 다르면 `no_pkg`(메인보드 그대로). 적용(버전 확인까지) 성공 뒤 그 슬롯이 APPLIED, 이전 APPLIED 는 OLD 가 됩니다.
+  - 상태: `dsp` 한 줄에 `pkg=<id>(<ver>) staged_pkg=<id|->`, `dsp pkg` 로 두 슬롯(STAGED/APPLIED/OLD/empty, id, ver, size, seq, job). 원격·BLE 에서도 됩니다(읽기 전용).
+  - 패키지 오류 err: `no_pkg`(필드 없음·형식 오류 / 적용할 짝 패키지 없음) · `pkg_nopart`(dsppkg 파티션 없음) · `pkg_too_big` · `pkg_url_host` · `pkg_url_too_long` · `pkg_size` · `pkg_sha` · `pkg_http_open`/`pkg_http_status`/`pkg_http_read`/`pkg_http_init` · `pkg_flash`. 표: [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md) 6절.
 - 이미지(.dspfw)는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. `dsp_pack.py info` 와 `dsp_flash.py` 는 파일을 읽을 때 블록이 주소 오름차순이고 겹치지 않는지 검사합니다(브리지 · 게이트웨이와 같은 규칙). 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dsppkg --enter 7`(`.dspfw` 도 됨).
 - 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 적용하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
 - 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다. 앱은 안전 확인 콜백을 반드시 넘겨야 하고, 넘기지 않으면 진입을 항상 거부(`app_ng_09`)합니다.
-- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply`.
-- **파티션 변경**: 0.5.0 부터 OTA 슬롯 1.75MB + `dspfw` 384KB. 이전 버전 브리지는 USB 로 한 번 전체를 다시 구워야 합니다.
+- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply` / `dsp pkg` (보관 패키지).
+- **파티션 변경**: 0.9.0 은 16MB 보드에 `dsppkg`(0x400000, 12MB)를 추가합니다. 기존 항목 위치는 그대로라 **파티션 표 + 앱만** 다시 구우면 호기 설정이 남습니다([FLASH_GUIDE](docs/FLASH_GUIDE.md) 3장 B 방법). 이전 표인 채 OTA 로 0.9.0 을 받은 브리지는 `pkg_st=nopart` 를 보고하고 메인보드 스테이징·적용을 `pkg_nopart` 로 거부합니다(부팅 로그·`dsp` 에도 표시).
+- 0.5.0 부터 OTA 슬롯 1.75MB + `dspfw` 384KB. 그 이전 버전 브리지는 USB 로 한 번 전체를 다시 구워야 합니다.
   구 파티션 테이블인 채 OTA 로 0.5.x 를 받은 브리지는 `dsp_st` 를 `nopart` 로 보고하고 메인보드 OTA 명령을 `no_partition` 으로 거부합니다(0.5.1 부터. 0.5.0 은 이 경우 재부팅).
 - 0.5.1: 스테이징 다운로드가 4KB 씩 지우며 받아 중계 지연이 줄고, HTTP 3xx 를 따라가며, 지우기 뒤 실패하면 메인보드 버전을 `?` 로 보고합니다. 부트로더·앱 지원 코드에 부트 카운터(기동 불능 앱 복구)와 파서 재동기가 추가되어 **앱은 `fwup_boot_ok()` 호출과 RAMM1 길이 0x3FA 가 필요**합니다 (`dsp/README.md`).
 

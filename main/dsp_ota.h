@@ -8,8 +8,12 @@
 
 esp_err_t dsp_ota_init(void);                          // uart_bridge·net_bridge 시작 후
 // 서버 패킷 처리 (JSON 텍스트)
-// DSP_OTA_START {url, ver, crc32, size, job, apply, recover}
+// DSP_OTA_START {url, ver, crc32, size, job, apply, recover, pkg_url, pkg_size, pkg_sha256, pkg_id}
 //  url: 199자 이하(넘으면 url_too_long), 호스트 = 설정된 서버 IP(아니면 url_host, 리다이렉트도 같은 규칙)
+//  pkg_*: 짝 패키지(.dsppkg) 필수 (0.9.0~). 없거나 형식 오류 → no_pkg (아무것도 건드리지 않음).
+//   pkg_nopart · pkg_too_big · pkg_url_too_long · pkg_url_host, 받기 pkg_size · pkg_sha · pkg_http_* · pkg_flash.
+//   패키지를 먼저 받아 dsppkg 슬롯에 기록 → .dspfw 스테이징 → 둘 다 끝나면 슬롯 확정 (download pct 는 합계 바이트 기준)
+//  적용은 짝 STAGED 패키지(dspfw_crc = 스테이징 파일 CRC, sha256 재확인)가 있어야 함 (없으면 no_pkg, 메인보드 그대로)
 void      dsp_ota_start(const char *json, size_t len);
 // DSP_OTA_APPLY {job, recover}
 //  U 무응답인데 최근 3초 안에 메인보드 앱 프레임을 받았으면(앱은 살아 있으나 업데이트 진입 미지원) recover 와 상관없이
@@ -26,7 +30,9 @@ void      dsp_ota_query_version(void);                  // 앱에 버전 조회 
 bool      dsp_ota_observe(const uint8_t *frame, size_t len);
 bool      dsp_ota_busy(void);                           // 프로그래밍 중 (ESP OTA 거부용)
 bool      dsp_ota_staging(void);                        // 스테이징(다운로드) 중 (ESP OTA 거부용)
-// 상태 JSON 조각: "dsp":"..","dspb":"..","dsp_build":"..","dsp_st":"..","staged":{..}  (앞뒤 중괄호·쉼표 없음)
+// 상태 JSON 조각: "dsp":"..","dspb":"..","dsp_build":"..","dsp_st":"..","staged":{..,"pkg":".."}|null,
+//  "pkg_st":"ok"|"nopart","dsp_pkg":{"id":"..","ver":".."}|null  (앞뒤 중괄호·쉼표 없음)
 size_t    dsp_ota_status_json(char *buf, size_t cap);
-size_t    dsp_ota_format_json(char *buf, size_t cap);   // stat json 의 "dsp" 객체 {..}
-size_t    dsp_ota_format(char *buf, size_t cap);        // 콘솔 stat 용 한 줄
+size_t    dsp_ota_format_json(char *buf, size_t cap);   // stat json 의 "dsp" 객체 {.., "pkg_st", "pkg":{..}|null}
+size_t    dsp_ota_format(char *buf, size_t cap);        // 콘솔 stat 용 한 줄 (pkg=<id>(<ver>) staged_pkg=<id|->)
+size_t    dsp_ota_pkg_format(char *buf, size_t cap);    // 'dsp pkg': 패키지 슬롯 2개 상태 (슬롯마다 한 줄)

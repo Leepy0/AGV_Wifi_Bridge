@@ -1,12 +1,15 @@
 // AGV Wi-Fi 브리지 벤치 테스트용 UDP 서버 (.NET 10 file-based app)
 // 실행: dotnet run BridgeTest.cs
 // 명령: list | send <agv> <data> | ping <agv> [횟수] | ota <agv> <bin 파일|url> | cfg <agv> [명령]
-//       | info <agv> | dspota <agv> stage <dspfw 파일|url> [apply] | dspota <agv> apply [recover] [job] | hb | quit
+//       | info <agv> | dspota <agv> stage <dsppkg 파일> [apply] | dspota <agv> apply [recover] [job] | hb | quit
 //   data 표기: <STX> <ETX> <CR> <LF> \xHH 사용 가능 (공백 유지)
 //   예) send 7 <STX>W1107C001X<ETX>
 //   ota 7 build\agv_wifi_bridge.bin  → 이 PC 가 HTTP(8070) 로 파일을 서비스하고 ESP 에 URL 전달
 //   cfg 7 set ip 192.168.10.107       → 원격 설정 (콘솔과 같은 키). cfg 7 = 현재 설정, cfg 7 save / cfg 7 reboot
-//   dspota 7 stage app.dspfw apply    → 메인보드 펌웨어: 이 PC 가 HTTP 로 파일 서비스, 브리지가 받아 두고(스테이징) 바로 적용
+//   dspota 7 stage AGV_Main_1.2.3.dsppkg apply
+//                                     → 메인보드 펌웨어: 패키지(.dsppkg)만 받음 (맨 .dspfw 거부). 이 PC 가 HTTP 로 패키지와
+//                                       그 안의 .dspfw 를 서비스하고 START 에 pkg_* 를 붙여 보냄 → 브리지가 패키지를 보관하고
+//                                       .dspfw 를 받아 두고(스테이징) 바로 적용 (브리지 0.9.0+)
 //   dspota 7 apply                    → 스테이징된 이미지 적용 (AGV 정지 상태에서). job 은 이 도구로 마지막 stage 한 번호를 씀 —
 //                                       도구를 다시 띄웠으면 dspota 7 apply <job> (info·heartbeat 의 staged.job)
 //   dspota 7 apply recover            → 구조 적용: 기동 불능 앱 복구 (브리지가 HELLO 를 50ms 간격으로 계속 보내는 동안
@@ -17,9 +20,12 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 const int MainPort = 50000;   // ESP server_port (MAIN_UP / STATUS / PONG 수신, 하향 송신)
 const int RfidPort = 50001;   // ESP rfid_port (RFID 브로드캐스트 수신)
@@ -41,7 +47,7 @@ var rxMain = RxLoop(mainSock, cts.Token);
 var rxRfid = RxLoop(rfidSock, cts.Token);
 
 Log($"listening udp {MainPort} (main/status/pong), {RfidPort} (rfid)");
-Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover] [job] | hb | quit");
+Log("commands: list | send <agv> <data> | ping <agv> [count] | ota <agv> <file.bin|url> | cfg <agv> [cmd] | info <agv> | dspota <agv> stage <file.dsppkg> [apply] | dspota <agv> apply [recover] [job] | hb | quit");
 
 while (Console.ReadLine() is { } line)
 {
@@ -104,7 +110,7 @@ while (Console.ReadLine() is { } line)
             else
             {
                 if (!File.Exists(p[2])) { Log($"file not found: {p[2]}"); break; }
-                FwServer.Serve(File.ReadAllBytes(p[2]), HttpPort, Log);
+                FwServer.Serve("/fw.bin", File.ReadAllBytes(p[2]), HttpPort, Log);
                 url = $"http://{LocalIpToward(ag.Ep!)}:{HttpPort}/fw.bin";
             }
             var pkt = Proto.Build(Proto.OtaStart, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(url));
@@ -122,7 +128,7 @@ while (Console.ReadLine() is { } line)
 
         case "dspota" when p.Length >= 3 && TryGetAgv(p[1], out var ag):
         {
-            // dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover] [job]
+            // dspota <agv> stage <file.dsppkg> [apply] | dspota <agv> apply [recover] [job]
             var sub = p[2].Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
             string json;
             if (sub[0] == "apply")
@@ -140,33 +146,30 @@ while (Console.ReadLine() is { } line)
             }
             else if (sub[0] == "stage" && sub.Length >= 2)
             {
-                string url, ver = "", extra = "";
                 var apply = sub.Length == 3 && sub[2] == "apply" ? 1 : 0;
                 if (sub[1].StartsWith("http", StringComparison.OrdinalIgnoreCase))
                 {
-                    url = sub[1];
+                    Log("URL 은 받지 않음 — 패키지(.dsppkg) 파일 경로를 주세요 (브리지 0.9.0 은 패키지와 .dspfw 를 함께 받음)");
+                    break;
                 }
-                else
-                {
-                    if (!File.Exists(sub[1])) { Log($"file not found: {sub[1]}"); break; }
-                    var data = File.ReadAllBytes(sub[1]);
-                    if (data.Length < 32 || Encoding.ASCII.GetString(data, 0, 7) != "AGVDSP1") { Log("not a .dspfw file"); break; }
-                    ver = Encoding.ASCII.GetString(data, 16, 16).TrimEnd('\0');
-                    var crc = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(12));   // 파일 헤더의 CRC (브리지가 대조)
-                    FwServer.Serve(data, HttpPort, Log);
-                    url = $"http://{LocalIpToward(ag.Ep!)}:{HttpPort}/fw.dspfw";
-                    extra = $",\"crc32\":{crc},\"size\":{data.Length}";
-                }
+                if (!File.Exists(sub[1])) { Log($"file not found: {sub[1]}"); break; }
+                if (!DspPkg.TryLoad(sub[1], out var pk, out var why)) { Log(why); break; }
+                // 패키지와 그 안의 .dspfw 를 함께 서비스 (브리지가 패키지를 먼저 받아 보관한 뒤 .dspfw 를 스테이징)
+                FwServer.Serve("/fw.dspfw", pk.Dspfw, HttpPort, Log);
+                FwServer.Serve("/pkg.dsppkg", pk.Package, HttpPort, Log);
+                var host = $"http://{LocalIpToward(ag.Ep!)}:{HttpPort}";
                 var job = ++dspJob;
                 if (apply == 0) stagedJob[ag.Id] = job; else stagedJob.Remove(ag.Id);   // stage … apply 는 받자마자 굽는다
-                json = $"{{\"url\":\"{url}\",\"ver\":\"{ver}\",\"job\":{job},\"apply\":{apply}{extra}}}";
+                json = $"{{\"url\":\"{host}/fw.dspfw\",\"ver\":\"{pk.Ver}\",\"job\":{job},\"apply\":{apply},\"crc32\":{pk.FileCrc},\"size\":{pk.Dspfw.Length}," +
+                       $"\"pkg_url\":\"{host}/pkg.dsppkg\",\"pkg_size\":{pk.Package.Length},\"pkg_sha256\":\"{pk.Sha256}\",\"pkg_id\":\"{pk.Id}\"}}";
+                Log($"[{ag.Id:D2}] package {Path.GetFileName(sub[1])}: ver {pk.Ver}, id {pk.Id}, {pk.Package.Length} B, .dspfw {pk.DspfwName} {pk.Dspfw.Length} B");
                 var pkt = Proto.Build(Proto.DspOtaStart, ag.Id, ag.NextDownSeq(), Encoding.ASCII.GetBytes(json));
                 mainSock.Send(pkt, pkt.Length, ag.Ep);
                 Log($"[{ag.Id:D2}] DSP_OTA_START {json}");
             }
             else
             {
-                Log("usage: dspota <agv> stage <file|url> [apply] | dspota <agv> apply [recover] [job]");
+                Log("usage: dspota <agv> stage <file.dsppkg> [apply] | dspota <agv> apply [recover] [job]");
             }
             break;
         }
@@ -319,15 +322,73 @@ static string Fmt(byte[] d)
     return $"{sb}  ({d.Length}B: {Convert.ToHexString(d)})";
 }
 
-// ───────── OTA 파일 서비스: 최소 HTTP 서버 (GET 전용, 마지막 Serve 호출 파일 제공) ─────────
+// ───────── 메인보드 패키지 (.dsppkg): 브리지는 풀지 않으므로 여기서 .dspfw 만 꺼내고 ID·해시를 계산 ─────────
+sealed record DspPkg(byte[] Package, byte[] Dspfw, string DspfwName, string Ver, uint FileCrc, string Sha256, string Id)
+{
+    // 패키지 검증은 간단히 (전체 검증은 dsp_pack.py verify / 게이트웨이). 맨 .dspfw 는 거부
+    public static bool TryLoad(string path, out DspPkg pkg, out string why)
+    {
+        pkg = null!;
+        var data = File.ReadAllBytes(path);
+        if (data.Length >= 7 && Encoding.ASCII.GetString(data, 0, 7) == "AGVDSP1")
+        {
+            why = "맨 .dspfw 는 보낼 수 없음 — .out/.map 을 함께 묶은 패키지(.dsppkg)만 받습니다 (dsp_pack.py bundle app.out --map app.map --ver <버전>)";
+            return false;
+        }
+        if (data.Length > 6_287_360) { why = $"패키지({data.Length} B)가 브리지 보관 한도(6,287,360 B)를 넘음"; return false; }
+        try
+        {
+            using var zip = new ZipArchive(new MemoryStream(data), ZipArchiveMode.Read);
+            var mfEntry = zip.GetEntry("manifest.json") ?? throw new InvalidDataException("manifest.json 없음");
+            byte[] mf;
+            using (var ms = new MemoryStream())
+            {
+                using (var s = mfEntry.Open()) s.CopyTo(ms);
+                mf = ms.ToArray();
+            }
+            using var doc = JsonDocument.Parse(mf);
+            var root = doc.RootElement;
+            if (root.GetProperty("format").GetString() != "agv-dsppkg" || root.GetProperty("format_ver").GetInt32() != 1)
+                throw new InvalidDataException("format 이 agv-dsppkg v1 이 아님");
+            var ver = root.GetProperty("ver").GetString() ?? "";
+            var name = root.GetProperty("files").GetProperty("dspfw").GetProperty("name").GetString() ?? "";
+            if (name.Contains('/') || name.Contains('\\') || !name.EndsWith(".dspfw", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"manifest 의 .dspfw 이름이 이상함: {name}");
+            var e = zip.GetEntry(name) ?? throw new InvalidDataException($"manifest 의 .dspfw({name}) 가 ZIP 에 없음");
+            if (e.Length > 393_152) throw new InvalidDataException(".dspfw 가 393,152 B 를 넘음");
+            byte[] fw;
+            using (var ms = new MemoryStream())
+            {
+                using (var s = e.Open()) s.CopyTo(ms);
+                fw = ms.ToArray();
+            }
+            if (fw.Length < 32 || Encoding.ASCII.GetString(fw, 0, 7) != "AGVDSP1") throw new InvalidDataException($"{name} 이 .dspfw 가 아님");
+            var fver = Encoding.ASCII.GetString(fw, 16, 16).TrimEnd('\0');
+            if (fver != ver) throw new InvalidDataException($"manifest ver({ver}) 과 .dspfw 버전({fver})이 다름");
+            pkg = new DspPkg(data, fw, name, ver, BinaryPrimitives.ReadUInt32LittleEndian(fw.AsSpan(12)),
+                             Convert.ToHexStringLower(SHA256.HashData(data)), Convert.ToHexStringLower(SHA256.HashData(mf))[..16]);
+            why = "";
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or KeyNotFoundException or JsonException or InvalidOperationException)
+        {
+            why = $"패키지(.dsppkg)가 아니거나 형식 오류: {ex.Message}";
+            return false;
+        }
+    }
+}
+
+// ───────── OTA 파일 서비스: 최소 HTTP 서버 (GET 전용, 경로별 파일 — 모르는 경로는 마지막 Serve 파일) ─────────
 static class FwServer
 {
     static TcpListener? _l;
-    static byte[] _data = [];
+    static readonly ConcurrentDictionary<string, byte[]> _files = new();
+    static byte[] _last = [];
 
-    public static void Serve(byte[] data, int port, Action<string> log)
+    public static void Serve(string path, byte[] data, int port, Action<string> log)
     {
-        _data = data;
+        _files[path] = data;
+        _last = data;
         if (_l is not null) return;
         _l = new TcpListener(IPAddress.Any, port);
         _l.Start();
@@ -357,8 +418,11 @@ static class FwServer
                 if (n <= 0) return;
                 req.Append(Encoding.ASCII.GetString(buf, 0, n));
             }
-            var data = _data;
-            log($"http {c.Client.RemoteEndPoint} {req.ToString().Split("\r\n")[0]} -> {data.Length} bytes");
+            var line = req.ToString().Split("\r\n")[0];
+            var parts = line.Split(' ');
+            var path = parts.Length >= 2 ? parts[1].Split('?')[0] : "/";
+            var data = _files.TryGetValue(path, out var f) ? f : _last;
+            log($"http {c.Client.RemoteEndPoint} {line} -> {data.Length} bytes");
             var hdr = $"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {data.Length}\r\nConnection: close\r\n\r\n";
             await ns.WriteAsync(Encoding.ASCII.GetBytes(hdr));
             await ns.WriteAsync(data);
