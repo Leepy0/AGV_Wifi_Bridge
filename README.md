@@ -52,7 +52,7 @@ idf.py -p COM5 flash monitor
 gcc 와 python3 만 있으면 됩니다. CI 의 `host-test` 가 같은 명령을 돌리고, 통과해야 빌드합니다.
 
 ```bash
-bash tests/host/run.sh          # 부트로더·앱 지원 코드: 프로토콜, 진입 판정, 부팅 시뮬레이션, 패커 selftest·기준 .dspfw 재현
+bash tests/host/run.sh          # 부트로더·앱 지원 코드: 프로토콜, 진입 판정, 부팅 시뮬레이션, 패커 selftest·기준 .dspfw 재현, 패키지 bundle/verify·USB 스테이징(가짜 hex2000·esptool)
 sh tests/dsp_ota_host/run.sh    # 브리지 메인보드 OTA 흐름 (가짜 UART·HTTP·파티션 + 실제 부트로더 처리기)
 make -C tests/bridge_util       # URL 호스트 검사, hb_ms 범위, 로그인 실패 계수, 자체 OTA 시작, 명령 처리
 ```
@@ -267,7 +267,14 @@ info 7                                # 메인보드 앱/부트로더 버전, �
 ```
 
 - BridgeTest 에서 스테이징만 하고(`apply` 없이) 나중에 `dspota 7 apply`(복구 적용은 `dspota 7 apply recover`)를 보내면, 그 도구로 마지막에 stage 한 job 번호를 그대로 씁니다. BridgeTest 를 다시 띄웠으면 `dspota 7 apply 180145124` 처럼 `info 7` · heartbeat 의 `staged.job` 번호를 끝에 붙입니다. 번호가 다르면 `job_mismatch`, 스테이징된 이미지가 없으면 `not_staged` 로 거부됩니다. 같은 번호로 이미 적용했다면 10분 동안은 그 결과만 다시 옵니다. 실패 뒤 다시 하려면 `dspota 7 stage …` 로 새로 스테이징한 뒤 `apply`(또는 `apply recover`)를 보냅니다. `dsp apply`(브리지 콘솔, 또는 BridgeTest 에서 `cfg 7 dsp apply`)는 job 검사 없이 적용합니다.
-- 이미지는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. `dsp_pack.py info` 와 `dsp_flash.py` 는 파일을 읽을 때 블록이 주소 오름차순이고 겹치지 않는지 검사합니다(브리지 · 게이트웨이와 같은 규칙). 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dspfw --enter 7`.
+- **배포는 패키지(`.dsppkg` = `.dspfw` + `.out` + `.map` + manifest)로 합니다.** `.out`/`.map` 은 필수입니다 — 원본 소스를 잃어도 복구할 수 있게 하는 재발 방지책입니다. 게이트웨이와 USB 스테이징은 패키지만 받고, 브리지 펌웨어와 `.dspfw` 형식은 그대로입니다.
+  ```
+  python tools/dsp_pack.py bundle app.out --map app.map --ver 1.2.3 --hex2000 <hex2000 경로>   # .out 에서 hex2000 으로 .dspfw 를 만들어 묶음 (CCS post-build: dsp/README.md)
+  python tools/dsp_pack.py verify AGV_Main_1.2.3.dsppkg                                         # 전체 검증 (info 로 내용 확인)
+  python tools/dsp_usb_stage.py COM5 AGV_Main_1.2.3.dsppkg                                      # 검수용: 게이트웨이 없이 USB 로 브리지 dspfw 파티션에 스테이징 → 콘솔/BLE 에서 dsp apply
+  ```
+  USB 스테이징은 협력사 신규 AGV 검수용입니다 (메인보드에 부트로더가 먼저 있어야 함, 자세한 절차: [docs/FLASH_GUIDE.md](docs/FLASH_GUIDE.md) 8-5). 패키지 형식: [docs/DSP_OTA_DESIGN.md](docs/DSP_OTA_DESIGN.md) 3-1절.
+- 이미지(.dspfw)는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. `dsp_pack.py info` 와 `dsp_flash.py` 는 파일을 읽을 때 블록이 주소 오름차순이고 겹치지 않는지 검사합니다(브리지 · 게이트웨이와 같은 규칙). 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dsppkg --enter 7`(`.dspfw` 도 됨).
 - 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 적용하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
 - 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다. 앱은 안전 확인 콜백을 반드시 넘겨야 하고, 넘기지 않으면 진입을 항상 거부(`app_ng_09`)합니다.
 - 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply`.

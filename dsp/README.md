@@ -7,7 +7,8 @@ dsp/common/   dsp_image.[ch]   이미지 헤더·CRC (부트로더·브리지·�
               bootproto.[ch]   브리지 ↔ 부트로더 프로토콜 (장치 쪽 처리기 + 패킷 함수)
 dsp/boot/     부트로더 (플래시 섹터 A)
 dsp/app/      메인보드 앱에 추가하는 파일 + 링커 cmd 예시
-tools/dsp_pack.py   CCS 빌드 결과 → OTA 이미지(.dspfw)
+tools/dsp_pack.py   CCS 빌드 결과(.out/.map) → 배포 패키지(.dsppkg = .dspfw + .out + .map)
+tools/dsp_usb_stage.py   패키지를 USB 로 브리지에 직접 스테이징 (검수용)
 tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
 ```
 
@@ -72,21 +73,24 @@ tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
 5. **앱 워치독을 반드시 켠다.** codestart(WD_DISABLE)·InitSysCtrl 이 워치독을 끄므로 초기화 뒤 다시 켜고(SCSR WDENINT = 0 리셋 모드, WDCR = 0x0028 등) 메인 루프에서 주기적으로 서비스(ServiceDog)한다.
    - 앱이 멈추면 워치독 리셋 → 부트 카운터가 올라 3회 뒤 업데이트 모드 → OTA 로 다시 고칠 수 있다.
    - 워치독 없이 멈추는 앱은 리셋이 나지 않아 이 경로로 못 살린다. 그때는 게이트웨이 복구 적용 중 `wait_power`(메인보드 전원을 껐다 켜세요) 안내가 뜨면 60초 안에 메인보드 전원을 다시 넣어 HELLO 창으로 들어가게 해야 한다.
-6. 빌드 후 post-build step (CCS: Properties → Build → Steps → Post-build):
+6. 빌드 후 post-build step (CCS: Properties → Build → Steps → Post-build). 배포용은 `.dspfw` 가 아니라 **패키지(`.dsppkg`)** 로 낸다:
    ```
-   "${CG_TOOL_HEX}" -i -o "${ProjName}.hex" "${BuildArtifactFileName}" --memwidth=16 --romwidth=16
-   python tools/dsp_pack.py pack "${ProjName}.hex" -o "${ProjName}_1.2.3.dspfw" --ver 1.2.3
+   python <path>/dsp_pack.py bundle "${ProjName}.out" --map "${ProjName}.map" --ver 1.2.3 --hex2000 "${CG_TOOL_ROOT}/bin/hex2000"
    ```
+   - 패키지는 `.dspfw` + **`.out` + `.map`** + manifest 를 한 파일로 묶는다. `.out`/`.map` 은 필수다 — 원본 소스를 잃어도 `.out`(DWARF)·`.map` 으로 복구할 수 있게 하는 재발 방지책이다. 게이트웨이와 `dsp_usb_stage.py` 는 패키지만 받는다.
+   - **Release 빌드도 디버그 정보(`-g`)를 켜 둔다.** DWARF 는 `.out` 에만 남고 플래시(`.dspfw`)에는 들어가지 않아 비용이 없다.
+   - `bundle` 은 `.out` 에서 hex2000 을 직접 돌려 `.dspfw` 를 만든다(`--memwidth=16 --romwidth=16`, 바이트 주소 HEX 는 패커가 거부). HEX 를 따로 받는 옵션은 없다 — `.dspfw` 가 그 `.out` 에서 나왔음을 보장하기 위해서다. 출력은 `.out` 옆의 `<이름>_<ver>.dsppkg`.
+   - `.map` 이 같은 빌드의 것인지 링크 시각(없으면 출력 파일 이름)으로 확인한다. 실기 `.out`/`.map` 으로 아직 검증하지 못해 막히면 `--no-link-check` (패키지에 `link_check: skipped` 로 기록되고 경고). 패키지 형식: [DSP_OTA_DESIGN.md](../docs/DSP_OTA_DESIGN.md) 3-1절.
    - 버전 문자열은 **영문·숫자·`.` `_` `-` 로 1~8자가 필수**다 (예: `1.2.3`, `2.0.15`). `R` 응답의 버전 칸이 8자 고정이라서다. 어기면 `dsp_pack.py` 가 패킹을 거부한다.
-   - HEX 는 반드시 `--memwidth=16 --romwidth=16`(워드 주소) 로 뽑는다 — 바이트 주소 HEX 는 패커가 거부한다.
+   - 확인: `python tools/dsp_pack.py verify <패키지>` (종료 코드 0/1), `info <패키지>`. 벤치에서 `.dspfw` 만 필요하면 기존 `hex2000 … --memwidth=16 --romwidth=16` + `dsp_pack.py pack app.hex -o app.dspfw --ver 1.2.3` 도 남아 있다.
 7. 첫 설치(1회, 유선): 부트로더(섹터 A) + 재링크한 앱(섹터 B~D) 을 JTAG 으로 굽고, 앱 헤더가 비어 있으므로
-   **처음 한 번은 브리지(또는 PC 에서 `tools/dsp_flash.py`)로 .dspfw 를 적용**해서 헤더를 채운다.
+   **처음 한 번은 브리지(또는 PC 에서 `tools/dsp_flash.py`, USB 스테이징 `tools/dsp_usb_stage.py`)로 패키지(.dsppkg)를 적용**해서 헤더를 채운다.
    헤더가 없으면 부트로더는 앱을 무효로 보고 업데이트 모드에서 기다린다. 게이트웨이에서는 앱 버전이 `?` 이고 앱 프레임도 없으므로, 일반 적용으로도 브리지가 HELLO 로 부트로더에 바로 들어간다('복구 적용' 은 필요 없다).
 
 ## 3. 벤치 검증 순서
 
 1. 부트로더만 굽고 리셋 → SCI-A 115200 으로 HELLO 응답 확인 (`python tools/dsp_flash.py COM5 --hello` → `boot_ver  : 1.1.0`, `app_valid : False` 등 항목별 한 줄).
-2. `python tools/dsp_flash.py COM5 app.dspfw` 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
+2. `python tools/dsp_flash.py COM5 app.dsppkg`(또는 `app.dspfw`) 로 앱 프로그래밍 → 리셋 후 앱 기동 확인.
 3. 앱에서 `F3107V000` 프레임에 `R3107V…` 응답, `F3107U000` 에 `R3107UOK00` 후 부트로더 진입 확인 (`dsp_flash.py COM5 --query 7`, `dsp_flash.py COM5 app.dspfw --enter 7`).
    safe 콜백 없이 빌드한 앱은 `R3107UNG09` 로 거부해야 한다.
    `fwup_handle()` 이 없는 구 앱이 프레임을 보내는 중이면(최근 3초 안에 STX 프레임) 브리지 적용은 원시 모드에 들어가지 않고 `app_no_fwup` 으로 끝나야 한다(중계 유지, `recover` 여도 같음).
@@ -102,4 +106,4 @@ tests/host/   호스트 시험 (gcc·python3) — CI host-test 와 같음
 9. 부트플래그 60초: `--enter 7` 로 부트로더에 넣은 뒤 패킷을 보내지 않음 → 약 60초 뒤 앱으로 돌아오는지.
 10. 부팅 지연: 정상 앱의 리셋 → 앱 시작까지 약 0.2초 늘어난 것을 확인하고, 앱의 기동 시간 조건과 충돌하지 않는지 본다.
 
-호스트 시험(실기 없이): `bash tests/host/run.sh` — 프로토콜·재동기·재전송 판정·READ 범위, `fwup_handle` 판정과 브리지 프레임 계약, 가상 하드웨어 위의 `boot_main.c`(HELLO 창 200ms·부트플래그 60초/600초·앱 무효 무기한 대기·부트 카운터·수신 오류 재동기), `dsp_pack.py` selftest(블록 역순·겹침 거부 포함)와 기준 .dspfw 재현.
+호스트 시험(실기 없이): `bash tests/host/run.sh` — 프로토콜·재동기·재전송 판정·READ 범위, `fwup_handle` 판정과 브리지 프레임 계약, 가상 하드웨어 위의 `boot_main.c`(HELLO 창 200ms·부트플래그 60초/600초·앱 무효 무기한 대기·부트 카운터·수신 오류 재동기), `dsp_pack.py` selftest(블록 역순·겹침 거부, 패키지 만들기·검증 포함)와 기준 .dspfw 재현, 가짜 hex2000·esptool 로 `bundle`/`verify`/`dsp_usb_stage.py`.

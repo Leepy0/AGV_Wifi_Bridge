@@ -1,6 +1,6 @@
 # 메인보드(TMS320F2808) OTA 설계 — B안: 상주 부트로더
 
-> 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`). 실기 검증 전.
+> 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`, USB 스테이징 `tools/dsp_usb_stage.py`). 실기 검증 전.
 > 기준: 브리지 **v0.5.2** · 게이트웨이 **v0.3.0**. 시간·코드 값은 `main/dsp_ota.c`, `dsp/boot/boot_cfg.h` 기준.
 > 범위: DSP 부트로더 · 메인보드 앱 수정 · 브리지(ESP32) · 패커 · 펌웨어 관리 서버(게이트웨이, 구현됨).
 
@@ -81,7 +81,7 @@
 
 ## 3. 앱 이미지 형식
 
-패커(`tools/dsp_pack.py`)가 CCS 빌드 결과에서 만든다. 서버에 올리는 파일이자 브리지가 보관하는 파일.
+패커(`tools/dsp_pack.py`)가 CCS 빌드 결과에서 만든다. 브리지가 보관하는 파일. 배포용으로는 `.out`·`.map` 과 함께 **패키지(`.dsppkg`, 3-1절)** 에 담아 서버에 올린다 — 브리지는 지금처럼 `.dspfw` 만 받는다.
 
 ### 앱 헤더 (플래시 0x3E8000, 64 워드)
 
@@ -121,6 +121,76 @@ CRC32: 표준(poly 0xEDB88320, init 0xFFFFFFFF, 최종 XOR). 워드마다 **하�
 ### 패커 입력
 
 `hex2000 -i -o app.hex app.out --memwidth=16 --romwidth=16` 의 Intel HEX. 이 옵션에서 주소는 **워드 단위**, 각 워드는 **상위 바이트 → 하위 바이트** 순으로 기록된다(컴파일러 18.12.8 로 실측). 바이트 주소(0x7D0000 대, `--romwidth=8` 등)로 나오면 패커가 **거부**한다 — 워드 재조립과 바이트 순서를 추측하면 CRC 는 맞지만 내용이 틀린 이미지가 만들어질 수 있기 때문. 버전은 `--ver 1.2.3` 인자로 준다.
+
+## 3-1. 배포 패키지 (`*.dsppkg`) — `.out`·`.map` 필수
+
+메인보드 프로그램은 `.dspfw` 만 들어가지 않고 **`.out`(DWARF)·`.map` 을 반드시 함께** 보관한다. 해외 엔지니어가 떠나고 원본 소스를 잃은 적이 있어서, 소스를 잃어도 `.out`·`.map` 으로 복구할 수 있게 하는 재발 방지책이다.
+게이트웨이 업로드와 USB 스테이징(`tools/dsp_usb_stage.py`)은 패키지만 받는다. 브리지 펌웨어와 `.dspfw` 형식은 바뀌지 않는다. 만들기 `dsp_pack.py bundle`, 검증 `verify`, 내용 `info`.
+
+**파일**: ZIP 하나(deflate), 루트에 **정확히 4개**, 하위 폴더 없음.
+
+| 항목 | 내용 |
+|---|---|
+| `manifest.json` | 아래 manifest (UTF-8, `sort_keys`·`indent=2`·끝 줄바꿈) |
+| `<stem>_<ver>.dspfw` | 3절 이미지 (형식 그대로) |
+| `<stem>.out` | CCS 링커 출력 (TI COFF 또는 ELF, C2000) |
+| `<stem>.map` | CCS 링커 맵 |
+
+- 항목 이름: `^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$`, 확장자 `.dspfw`/`.out`/`.map`(대소문자 무시). `/` `\` `..`·디렉터리·중복·4개 외 항목은 거부. 원본 이름이 규칙에 안 맞으면 패커가 `[^A-Za-z0-9._-]` → `_` 로 바꾸고 원래 이름은 manifest `orig_name` 에 남긴다.
+- 크기 한도(압축 해제 기준, ZIP 선언값을 믿지 않고 읽으며 센다): `.dspfw` ≤ 393,152 B(= dspfw 파티션 0x60000 − 머리 64), `.out` ≤ 64 MiB, `.map` ≤ 16 MiB, manifest ≤ 64 KiB.
+
+**manifest** (읽는 쪽은 키 순서·공백에 의존하지 않고, 모르는 키는 무시):
+
+```json
+{ "format": "agv-dsppkg", "format_ver": 1, "ver": "1.2.3", "created_utc": "2026-10-31T05:00:00Z",
+  "tool": "dsp_pack.py bundle", "hex2000": "C:/ti/.../bin/hex2000.exe", "link_check": "time",
+  "files": {
+    "dspfw": { "name": "AGV_Main_1.2.3.dspfw", "size": 12345, "sha256": "<소문자 hex 64자>" },
+    "out":   { "name": "AGV_Main.out", "orig_name": "AGV_Main.out", "size": 234567, "sha256": "...",
+               "format": "coff2", "target": 157, "timestamp": 1793422810 },
+    "map":   { "name": "AGV_Main.map", "orig_name": "AGV_Main.map", "size": 45678, "sha256": "...",
+               "output": "AGV_Main.out", "linked": "Fri Oct 30 14:20:10 2026" } },
+  "dspfw": { "app_len": 12345, "app_crc32": "1a2b3c4d", "build_time": 1793422900 } }
+```
+
+- `ver` 는 `.dspfw` 의 파일·앱 헤더 버전과 같아야 한다(3절 버전 규칙). `files.*.size`·`sha256` 은 실제 항목과, `dspfw.*` 는 앱 헤더 값과 같아야 한다.
+- `out.format` = `coff1`/`coff2`/`elf`, `target` = COFF 대상 ID(C2000 은 0x009D=157 로 알고 있음, 다르면 경고만) 또는 ELF e_machine(141), `timestamp` = COFF 머리의 링크 시각(unix 초), ELF 는 0.
+- **패키지 ID** = `sha256(manifest.json 의 ZIP 안 바이트)` 소문자 hex 앞 16자. 화면·로그에 표시하고 USB 스테이징 머리에도 기록한다.
+
+**.out / .map 검사**:
+- `.out` TI COFF: 앞 2바이트(LE) 0x00C1 = coff1, 0x00C2 = coff2, 머리 22 B (`[4]u32 시각 … [20]u16 대상 ID`). ELF: `7F 45 4C 46`, 32bit·LE·e_machine 141. 둘 다 아니면 거부.
+- `.map`: NUL 없는 텍스트, `OUTPUT FILE NAME:   <이름>` 이 있어야 함(basename 만 씀). `>> Linked Www Mmm d HH:MM:SS YYYY`(C `ctime` 형식)가 있으면 그 시각.
+
+**.map ↔ .out 연결 확인** (패커·게이트웨이 같은 규칙):
+
+```
+ts = .out 의 COFF 링크 시각(ELF 는 0),  lt = map 의 Linked 시각을 시간대 없이 UTC 로 본 unix 초 (없으면 None)
+ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋만큼 차이 남)
+    어떤 정수 k (|k| ≤ 56, ±14시간) 에 대해 |d − 900·k| ≤ 5  이면 통과 ("time"), 아니면 거부   (이름이 달라도 시각이 맞으면 통과, 경고만)
+아니면: map 의 출력 파일 이름과 .out 원래 이름이 대소문자 무시로 같으면 통과 ("name"), 아니면 거부
+```
+
+패커는 `--no-link-check` 로 이 확인을 건너뛸 수 있다(`link_check: "skipped"` 로 기록, 경고) — 실기 `.out`/`.map` 으로 아직 검증 전이라 막힐 때의 탈출구. 읽는 쪽은 `skipped` 면 규칙을 다시 돌리지 않고 경고와 함께 받고, 그 외에는 같은 규칙을 다시 돌려 manifest 값과 다르면 거부한다.
+
+**패커 `bundle app.out --map app.map --ver V [-o PKG] [--hex2000 PATH] [--build UNIX] [--no-link-check]`**:
+1. `.out`·`.map` 형식 검사, 연결 확인.
+2. `hex2000 -i -o <임시>/app.hex app.out --memwidth=16 --romwidth=16` 을 직접 실행(종료 코드·HEX 생성 확인). hex2000 은 `--hex2000` → 환경변수 `HEX2000` → PATH → Windows `C:\ti\ccs*\ccs\tools\compiler\ti-cgt-c2000_*\bin` 중 가장 새 것 순으로 찾는다.
+3. `parse_intel_hex` → `pack` 으로 `.dspfw`. **HEX 를 직접 받는 옵션은 없다** — `.dspfw` 가 그 `.out` 에서 나왔음을 보장하기 위해서다(기존 `pack` 은 벤치용).
+4. manifest 를 만들고 ZIP 으로 묶는다. 기본 출력 `<stem>_<ver>.dsppkg`(`.out` 옆). 만든 직후 읽는 쪽 규칙(`verify_package`)으로 다시 검증한다.
+
+**USB 스테이징 머리** (`tools/dsp_usb_stage.py`, 브리지 dspfw 파티션 오프셋 0, 64 B — `main/dsp_ota.c` 의 `stage_hdr_t` 와 같음, 모두 LE):
+
+| 오프셋 | 필드 | 값 |
+|---|---|---|
+| 0 | `magic[8]` | `"DSPSTG1\0"` |
+| 8 | `job` u32 | **0** (작업 번호 없음 — 콘솔·BLE `dsp apply` 로 적용) |
+| 12 | `file_len` u32 | `.dspfw` 길이 |
+| 16 | `file_crc` u32 | `.dspfw` 파일 머리 오프셋 12 의 CRC |
+| 20 | `app_crc` u32 | 앱 헤더의 `app_crc32` |
+| 24 | `ver[16]` | 버전 (NUL 패딩) |
+| 40 | `rsvd[24]` | `[0..15]` = 패키지 ID ASCII 16자, `[16..23]` = 0 — 브리지는 `rsvd` 를 읽지 않는다(기록만) |
+
+머리 바로 뒤(오프셋 64)에 `.dspfw` 원본 바이트. 쓰기 전에 패키지를 전부 검증하고, 맨 `.dspfw` 는 거부한다. 파티션 위치는 보드(또는 `--bridge` 전체 이미지)의 파티션 표에서 읽는다.
 
 ## 4. 부트로더 (섹터 A)
 

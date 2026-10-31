@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 호스트 시험 (gcc·python3): 부트로더/브리지 공용 프로토콜, 앱 업데이트 진입 판정, 부트로더 진입 시뮬레이션,
-# 부트로더 하드웨어 계층 문법 검사, 패커 selftest·기준 .dspfw 재현. CI(build.yml host-test)와 로컬에서 같이 쓴다.
+# 부트로더 하드웨어 계층 문법 검사, 패커 selftest(패키지 포함)·기준 .dspfw 재현, 패키지 bundle/verify·USB 스테이징 도구(가짜 hex2000·esptool).
+# CI(build.yml host-test)와 로컬에서 같이 쓴다.
 #   tests/host/run.sh            (SAN=0 이면 주소·UB 검사기 끔)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -41,5 +42,8 @@ python3 "$ROOT/tools/dsp_pack.py" pack "$HT/golden/app_golden.hex" -o "$OUT/gold
 cmp "$OUT/golden.dspfw" "$HT/golden/app_golden.dspfw"
 python3 "$ROOT/tools/dsp_pack.py" info "$HT/golden/app_golden.dspfw"
 python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ROOT/tools/dsp_flash.py"
+
+echo "== .dsppkg bundle/verify + dsp_usb_stage.py (가짜 hex2000·가짜 esptool, stage_hdr_t·partitions.csv 대조)"
+python3 "$HT/test_usb_stage.py"
 
 echo "host tests: all passed"

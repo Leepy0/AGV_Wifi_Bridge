@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """메인보드(F2808) 부트로더 시리얼 프로그래머 — 벤치용 (브리지 없이 PC 의 RS232 로 직접)
 
-  dsp_flash.py COM5 app.dspfw            # 앱 프로그래밍 (HELLO → ERASE → WRITE → 헤더 → VERIFY → RESET)
+  dsp_flash.py COM5 app.dsppkg           # 앱 프로그래밍 (HELLO → ERASE → WRITE → 헤더 → VERIFY → RESET). .dspfw 도 됨 (벤치용)
+                                         #   .dsppkg 는 dsp_pack.verify_package 로 전부 검증한 뒤 안의 .dspfw 를 쓴다
   dsp_flash.py COM5 app.dspfw --enter 7  # 먼저 07호기 앱에 F…U000 프레임으로 부트로더 진입 요청
   dsp_flash.py COM5 --hello              # 부트로더 응답·앱 유효성 확인
   dsp_flash.py COM5 --read 0x3E8000 64   # 플래시·OTP 읽기 (진단, 최대 128 워드)
@@ -142,8 +143,11 @@ def dsp_pack_bcc(payload: bytes) -> str:
 
 
 def program(b, path, enter_agv=None, pan="1"):
-    with open(path, "rb") as f:
-        info = dsp_pack.unpack(f.read())
+    info, pkg = dsp_pack.load_dspfw_info(path)         # .dspfw 또는 .dsppkg (패키지는 전체 검증)
+    if pkg:
+        print(f"package: pkg id {pkg['pkg_id']}, link_check {pkg['link_check']}")
+        for w in pkg["warnings"]:
+            print(f"warning: {w}", file=sys.stderr)
     print(f"image: ver {info['ver']} app_len {info['app_len']} words crc {info['app_crc']:08X} blocks {len(info['blocks'])}")
 
     if enter_agv is not None:
@@ -185,7 +189,7 @@ def program(b, path, enter_agv=None, pan="1"):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("port")
-    p.add_argument("image", nargs="?", help=".dspfw 파일")
+    p.add_argument("image", nargs="?", help=".dsppkg 또는 .dspfw 파일")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--enter", type=int, metavar="AGV", help="프로그래밍 전 앱에 진입 요청 (호기 번호)")
     p.add_argument("--pan", default="1", help="F 프레임 PAN ID (기본 1)")
