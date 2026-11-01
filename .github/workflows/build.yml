@@ -102,6 +102,8 @@ jobs:
           # flash_args 의 경로(bootloader/…, partition_table/…)를 zip 의 평평한 구조에 맞춤 → write_flash @flash_args 가능
           sudo sed 's#[^ ]*/##' build/flash_args > "$OUT/flash_args"
           sudo cp build/merged-binary.bin "$OUT/agv_wifi_bridge_merged.bin"
+          # 디버그용 .elf(심볼)·.map — 현장 zip 에는 넣지 않고 릴리스 자산으로 따로 올린다 (게이트웨이가 bridge.json 으로 가져감)
+          sudo cp build/agv_wifi_bridge.elf build/agv_wifi_bridge.map dist/
           cp tools/flash.bat tools/flash.sh docs/FLASH_GUIDE.md "$OUT/"
           # 메인보드 패키지(.dsppkg) 도구: dsp_usb_stage.py·dsp_pkg_read.py 가 같은 폴더의 dsp_pack.py(·dsp_usb_stage.py)를
           # import 하므로 zip 루트에 함께 둔다
@@ -173,6 +175,8 @@ jobs:
               "zip": ent(f"dist/agv_wifi_bridge_{ver}.zip"),
               "app": ent(f"{d}/agv_wifi_bridge.bin", "0x20000"),
               "merged": ent(f"{d}/agv_wifi_bridge_merged.bin", "0x0"),
+              "elf": ent("dist/agv_wifi_bridge.elf"),
+              "map": ent("dist/agv_wifi_bridge.map"),
               "minPartitionVersion": "0.9.0",
               "notes": subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip(),
           }
@@ -185,6 +189,13 @@ jobs:
           name: agv_wifi_bridge_${{ steps.ver.outputs.ver }}
           path: dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agv_wifi_bridge_${{ steps.ver.outputs.ver }}_elf_map
+          path: |
+            dist/agv_wifi_bridge.elf
+            dist/agv_wifi_bridge.map
+
       # v* 태그 푸시, 또는 수동 실행 release=true (태그가 없으면 이 커밋에 만든다)
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v') || env.RELEASE == 'true'
@@ -196,5 +207,7 @@ jobs:
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}.zip
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge.bin
             dist/agv_wifi_bridge_${{ steps.ver.outputs.ver }}/agv_wifi_bridge_merged.bin
+            dist/agv_wifi_bridge.elf
+            dist/agv_wifi_bridge.map
             dist/bridge.json
           generate_release_notes: true
