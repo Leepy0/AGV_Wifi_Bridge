@@ -1,7 +1,7 @@
 # 메인보드(TMS320F2808) OTA 설계 — B안: 상주 부트로더
 
 > 상태: 구현됨 (부트로더 `dsp/boot`, 앱 지원 `dsp/app`, 브리지 `main/dsp_ota.c`·`main/dsp_pkg.c`, 패커 `tools/dsp_pack.py`, PC 프로그래머 `tools/dsp_flash.py`, USB 스테이징 `tools/dsp_usb_stage.py`, 원본 꺼내기 `tools/dsp_pkg_read.py`). 실기 검증 전.
-> 기준: 브리지 **v0.9.0** (패키지 보관) · 게이트웨이 **v0.7.0** (`pkg_*` 전송). 그 밖의 동작은 브리지 0.5.2 · 게이트웨이 0.3.0 기준. 시간·코드 값은 `main/dsp_ota.c`, `dsp/boot/boot_cfg.h` 기준.
+> 기준: 브리지 **v0.9.1** (패키지 보관·현장 읽기) · 게이트웨이 **v0.7.0** (`pkg_*` 전송). 그 밖의 동작은 브리지 0.5.2 · 게이트웨이 0.3.0 기준. 시간·코드 값은 `main/dsp_ota.c`, `dsp/boot/boot_cfg.h` 기준.
 > 범위: DSP 부트로더 · 메인보드 앱 수정 · 브리지(ESP32) · 패커 · 펌웨어 관리 서버(게이트웨이, 구현됨).
 
 ## 1. 전체 구조
@@ -320,8 +320,10 @@ ts > 0 이고 lt 가 있으면:  d = ts − lt  (링크 PC 시간대 오프셋�
 
 ### 패키지 보관 (dsppkg, 0.9.0)
 
-브리지가 메인보드에 굽는 모든 프로그램은 **짝 패키지(.dsppkg 통째)가 브리지 flash 에 있어야 한다** (필수). 브리지는 ZIP 을 풀지 않고 바이트 그대로 보관한다. 브리지를 떼어 `tools/dsp_pkg_read.py` 로 읽으면 그 AGV 에서 도는 프로그램의 `.out`·`.map` 을 되찾는다.
+브리지가 메인보드에 굽는 모든 프로그램은 **짝 패키지(.dsppkg 통째)가 브리지 flash 에 있어야 한다** (필수). 브리지는 ZIP 을 풀지 않고 바이트 그대로 보관한다. 브리지를 떼어 `tools/dsp_pkg_read.py` 로 읽으면 그 AGV 에서 도는 프로그램의 `.out`·`.map` 을 되찾는다. 0.9.1 부터는 브리지를 떼지 않고 현장 연결(BLE·USB 콘솔)로도 읽는다.
 
+- 읽기 명령 (0.9.1~, 읽기 전용): `dsp pkg json` (슬롯 목록 한 줄 JSON) · `dsp pkg read <slot> <off> <len>` (한 줄 `P <id> <off> <n> <crc32> <base64>` 또는 `E nopart|busy|local_only|slot|range|flash`). `len` 1~512, `off` 는 패키지 시작 기준(슬롯 머리 4KB 제외). 응답은 줄바꿈으로 끝난다.
+- 현장 연결(BLE)·USB 콘솔에서만 받는다. UDP 서버 경로는 읽기 전에 `local_only` 로 거부한다. 메인보드 굽기·스테이징 중에는 슬롯을 쓰는 중이라 `busy` 로 거부한다. 숫자가 아니거나 32비트를 넘는 인자는 `E range`. 인자 없는 `dsp pkg` 는 기존 텍스트 그대로.
 - 슬롯 2개 (A/B): 슬롯 n 시작 = n × 0x600000. 각 슬롯 = 머리 섹터 4KB + 패키지 바이트(슬롯 오프셋 0x1000). **패키지 최대 6,287,360 B** (넘으면 `pkg_too_big`).
 - 슬롯 머리 (LE, 128 B, 섹터 나머지 0xFF, `main/dsp_pkg.c` `pkg_hdr_t`):
 

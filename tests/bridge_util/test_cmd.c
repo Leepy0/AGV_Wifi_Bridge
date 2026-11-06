@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "setup.h"
 #include "dsp_ota.h"
+#include "dsp_pkg.h"
 #include "timesync.h"
 #include "cmd.h"
 #include "test_common.h"
@@ -30,6 +31,14 @@ size_t net_test(const char *host, char *buf, size_t cap) {
     return (size_t)snprintf(buf, cap, "ping x: 3/3 ok, avg 4 ms\n");
 }
 size_t dsp_ota_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
+static int s_pkg_json, s_pkg_read;
+static uint32_t s_rd_slot, s_rd_off, s_rd_len;
+size_t dsp_pkg_format_json(char *buf, size_t cap) { s_pkg_json++; return (size_t)snprintf(buf, cap, "{\"slots\":[{\"i\":0,\"st\":\"empty\"}]}"); }
+size_t dsp_pkg_read_line(int slot, uint32_t off, uint32_t len, char *out, size_t cap) {
+    s_pkg_read++; s_rd_slot = (uint32_t)slot; s_rd_off = off; s_rd_len = len;
+    if (slot < 0 || slot > 1) return (size_t)snprintf(out, cap, "E slot\n");
+    return (size_t)snprintf(out, cap, "P abc %u 1 00000000 AA==\n", (unsigned)off);
+}
 static int s_pkg_fmt;
 size_t dsp_ota_pkg_format(char *buf, size_t cap) { s_pkg_fmt++; return (size_t)snprintf(buf, cap, "pkg slot0: empty\npkg slot1: empty\n"); }
 void dsp_ota_query_version(void) {}
@@ -172,6 +181,43 @@ int main(void)
     CHECK(s_pkg_fmt == 2);
     run("help", CMD_SRC_SERVER, out, sizeof(out), &act);
     CHECK(strstr(out, "dsp [ver|apply|pkg]") != NULL);
+
+    // dsp pkg json / read: 현장(BLE·USB)만, 굽기·스테이징 중엔 busy
+    run("dsp pkg json", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_pkg_json == 1 && strncmp(out, "{\"slots\"", 8) == 0 && out[strlen(out) - 1] == '\n');
+    out[strlen(out) - 1] = '\0';
+    CHECK(json_balanced(out));
+    run("dsp pkg json", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_pkg_json == 1 && strcmp(out, "{\"err\":\"local_only\"}\n") == 0);
+    run("dsp pkg read 0 0 512", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_pkg_read == 1 && s_rd_slot == 0 && s_rd_off == 0 && s_rd_len == 512 && strncmp(out, "P abc", 5) == 0);
+    run("dsp pkg read 1 4096 100", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(s_rd_slot == 1 && s_rd_off == 4096 && s_rd_len == 100);
+    run("dsp pkg read 0 0 512", CMD_SRC_SERVER, out, sizeof(out), &act);
+    CHECK(s_pkg_read == 2 && strcmp(out, "E local_only\n") == 0);
+    run("dsp pkg read 2 0 1", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(strcmp(out, "E slot\n") == 0);
+    int rd = s_pkg_read;
+    const char *bad[] = { "dsp pkg read", "dsp pkg read 0", "dsp pkg read 0 0", "dsp pkg read x 0 1", "dsp pkg read 0 -1 1",
+                          "dsp pkg read 0 4294967296 1", "dsp pkg read 0 0 99999999999", "dsp pkg read 0 1a 1" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        run(bad[i], CMD_SRC_LOCAL, out, sizeof(out), &act);
+        CHECK(strcmp(out, "E range\n") == 0);
+    }
+    CHECK(s_pkg_read == rd);
+    int js = s_pkg_json;
+    for (int k = 0; k < 2; k++) {
+        s_dsp_prog = k == 0;
+        s_dsp_stage = k == 1;
+        run("dsp pkg json", CMD_SRC_LOCAL, out, sizeof(out), &act);
+        CHECK(strcmp(out, "{\"err\":\"busy\"}\n") == 0);
+        run("dsp pkg read 0 0 512", CMD_SRC_LOCAL, out, sizeof(out), &act);
+        CHECK(strcmp(out, "E busy\n") == 0);
+    }
+    s_dsp_prog = s_dsp_stage = false;
+    CHECK(s_pkg_json == js && s_pkg_read == rd);
+    run("dsp pkg", CMD_SRC_LOCAL, out, sizeof(out), &act);      // 인자 없는 pkg 는 텍스트 그대로
+    CHECK(strstr(out, "pkg slot0: empty") != NULL);
 
     // 시각 동기: time 명령, stat 텍스트에도 한 줄
     run("time", CMD_SRC_LOCAL, out, sizeof(out), &act);

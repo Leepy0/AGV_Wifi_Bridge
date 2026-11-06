@@ -8,6 +8,7 @@
 #include "ota.h"
 #include "setup.h"
 #include "dsp_ota.h"
+#include "dsp_pkg.h"
 #include "timesync.h"
 #include "cmd.h"
 
@@ -60,6 +61,51 @@ size_t cmd_nettest(const char *host, char *out, size_t cap)
 {
     size_t n;
     return diag_busy(out, cap, "nettest", &n) ? n : net_test(host, out, cap);
+}
+
+// 'dsp pkg json' — 한 줄 JSON + 줄바꿈. 굽기·스테이징 중에는 슬롯을 쓰는 중이라 거부
+size_t cmd_pkg_json(char *out, size_t cap)
+{
+    if (dsp_ota_busy() || dsp_ota_staging()) {
+        return clamp(snprintf(out, cap, "{\"err\":\"busy\"}\n"), cap);
+    }
+    size_t n = dsp_pkg_format_json(out, cap);
+    if (n == 0 || n + 2 > cap) {
+        return clamp(snprintf(out, cap, "{\"err\":\"overflow\"}\n"), cap);
+    }
+    out[n++] = '\n';
+    out[n]   = '\0';
+    return n;
+}
+
+// 10진수 숫자만 받는다 (빈 문자열·부호·공백·32비트 초과는 거부)
+static bool parse_u32(const char *s, uint32_t *v)
+{
+    if (s == NULL || *s == '\0') {
+        return false;
+    }
+    uint64_t x = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9' || (x = x * 10 + (uint64_t)(*s - '0')) > UINT32_MAX) {
+            return false;
+        }
+    }
+    *v = (uint32_t)x;
+    return true;
+}
+
+// 'dsp pkg read <slot> <off> <len>' — 한 줄(P/E) 응답. out 은 726 B 이상 필요
+size_t cmd_pkg_read(const char *slot, const char *off, const char *len, char *out, size_t cap)
+{
+    uint32_t s, o, l;
+    if (dsp_ota_busy() || dsp_ota_staging()) {
+        return clamp(snprintf(out, cap, "E busy\n"), cap);
+    }
+    if (!parse_u32(slot, &s) || !parse_u32(off, &o) || !parse_u32(len, &l) || s > INT32_MAX) {
+        return clamp(snprintf(out, cap, "E range\n"), cap);
+    }
+    size_t n = dsp_pkg_read_line((int)s, o, l, out, cap);
+    return n ? n : clamp(snprintf(out, cap, "E range\n"), cap);
 }
 
 size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act)
@@ -155,6 +201,22 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
         // dsp | dsp ver | dsp apply | dsp pkg   (스테이징은 서버 패킷으로만, pkg 는 읽기 전용)
         char *arg = strtok_r(NULL, " ", &rest);
         if (arg && strcmp(arg, "pkg") == 0) {
+            // dsp pkg [json | read <slot> <off> <len>] — json·read 는 현장(BLE)·USB 만, UDP 는 읽기 전에 거부
+            char *sub = strtok_r(NULL, " ", &rest);
+            bool is_json = sub && strcmp(sub, "json") == 0;
+            bool is_read = sub && strcmp(sub, "read") == 0;
+            if ((is_json || is_read) && src != CMD_SRC_LOCAL) {
+                return clamp(snprintf(out, cap, is_json ? "{\"err\":\"local_only\"}\n" : "E local_only\n"), cap);
+            }
+            if (is_json) {
+                return cmd_pkg_json(out, cap);
+            }
+            if (is_read) {
+                char *a = strtok_r(NULL, " ", &rest);
+                char *b = strtok_r(NULL, " ", &rest);
+                char *c = strtok_r(NULL, " ", &rest);
+                return cmd_pkg_read(a, b, c, out, cap);
+            }
             return dsp_ota_pkg_format(out, cap);
         }
         if (arg && strcmp(arg, "ver") == 0) {

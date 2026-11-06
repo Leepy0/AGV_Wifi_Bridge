@@ -181,6 +181,19 @@ static int cmd_setup(int argc, char **argv)
 static int cmd_dsp(int argc, char **argv)
 {
     static char buf[320];               // 콘솔 태스크 스택 절약
+    static char big[1024];              // pkg read 한 줄(최대 ~726 B)
+    if (argc >= 3 && strcmp(argv[1], "pkg") == 0) {
+        if (strcmp(argv[2], "json") == 0 && argc == 3) {
+            cmd_pkg_json(big, sizeof(big));
+            fputs(big, stdout);
+            return 0;
+        }
+        if (strcmp(argv[2], "read") == 0) {
+            cmd_pkg_read(argc > 3 ? argv[3] : NULL, argc > 4 ? argv[4] : NULL, argc > 5 ? argv[5] : NULL, big, sizeof(big));
+            fputs(big, stdout);
+            return 0;
+        }
+    }
     if (argc == 2 && strcmp(argv[1], "pkg") == 0) {
         dsp_ota_pkg_format(buf, sizeof(buf));
         fputs(buf, stdout);
@@ -277,7 +290,7 @@ void console_start(void)
         { .command = "log",      .help = "log <none|error|warn|info|debug|verbose> : runtime log level", .func = cmd_log },
         { .command = "ota",      .help = "ota [<url>|confirm] : firmware update / confirm", .func = cmd_ota },
         { .command = "setup",    .help = "setup [on|off] : wireless setup mode (phone BLE)", .func = cmd_setup },
-        { .command = "dsp",      .help = "dsp [ver|apply|pkg] : main board firmware status / query / apply staged / stored packages", .func = cmd_dsp },
+        { .command = "dsp",      .help = "dsp [ver|apply|pkg [json|read <slot> <off> <len>]] : main board firmware status / query / apply staged / stored packages", .func = cmd_dsp },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_console_cmd_register(&cmds[i]));
