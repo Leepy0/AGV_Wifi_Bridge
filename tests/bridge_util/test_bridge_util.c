@@ -156,6 +156,26 @@ static void test_time_solve(void)
     CHECK(!solve("garbage", 5, -1, &t));
 }
 
+static void test_base64(void)
+{
+    char o[16];
+    // RFC 4648 시험 벡터
+    CHECK(bu_base64((const uint8_t *)"", 0, o, sizeof(o)) == 0 && o[0] == '\0');
+    CHECK(bu_base64((const uint8_t *)"f", 1, o, sizeof(o)) == 4 && strcmp(o, "Zg==") == 0);
+    CHECK(bu_base64((const uint8_t *)"fo", 2, o, sizeof(o)) == 4 && strcmp(o, "Zm8=") == 0);
+    CHECK(bu_base64((const uint8_t *)"foo", 3, o, sizeof(o)) == 4 && strcmp(o, "Zm9v") == 0);
+    CHECK(bu_base64((const uint8_t *)"foobar", 6, o, sizeof(o)) == 8 && strcmp(o, "Zm9vYmFy") == 0);
+    // 0xFF 바이트 (+ / 문자표 끝)
+    CHECK(bu_base64((const uint8_t *)"\xff\xff\xff", 3, o, sizeof(o)) == 4 && strcmp(o, "////") == 0);
+    CHECK(bu_base64((const uint8_t *)"\xfb\xef\xbe", 3, o, sizeof(o)) == 4 && strcmp(o, "++++") == 0);
+    // 공간 부족: 문자 수 + NUL 이 cap 에 들어가야 함 — 모자라면 0, 한 글자도 쓰지 않음
+    memset(o, 'x', sizeof(o));
+    CHECK(bu_base64((const uint8_t *)"foo", 3, o, 4) == 0 && o[0] == 'x');
+    CHECK(bu_base64((const uint8_t *)"foo", 3, o, 5) == 4 && strcmp(o, "Zm9v") == 0);
+    CHECK(bu_base64((const uint8_t *)"foobar", 6, o, 8) == 0);
+    CHECK(bu_base64((const uint8_t *)"f", 1, o, 0) == 0);
+}
+
 int main(void)
 {
     test_json_i64();
@@ -164,5 +184,6 @@ int main(void)
     test_parse_ipv4();
     test_url_host();
     test_login_guard();
+    test_base64();
     DONE("test_bridge_util");
 }

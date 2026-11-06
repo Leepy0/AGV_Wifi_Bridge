@@ -1,12 +1,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "psa/crypto.h"
 #include "dsp_app_proto.h"
+#include "dsp_image.h"
+#include "bridge_util.h"
 #include "dsp_pkg.h"
 
 static const char *TAG = "dsp_pkg";
@@ -428,4 +431,98 @@ size_t dsp_pkg_format(char *buf, size_t cap, uint32_t staged_crc)
         }
     }
     return n;
+}
+
+// ───────── 앱으로 내려받기 (읽기 전용) ─────────
+
+// buf+*n 에 덧붙인다. 칸이 모자라면 false
+static bool put(char *buf, size_t cap, size_t *n, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf + *n, cap - *n, fmt, ap);
+    va_end(ap);
+    if (r < 0 || (size_t)r >= cap - *n) {
+        return false;
+    }
+    *n += (size_t)r;
+    return true;
+}
+
+size_t dsp_pkg_format_json(char *buf, size_t cap)
+{
+    if (cap == 0) {
+        return 0;
+    }
+    size_t n = 0;
+    bool ok = true;
+    if (!s_part) {
+        ok = put(buf, cap, &n, "{\"err\":\"nopart\"}");
+    } else {
+        ok = put(buf, cap, &n, "{\"slots\":[");
+        for (int i = 0; ok && i < DSP_PKG_SLOTS; i++) {
+            const dsp_pkg_slot_t s = s_slot[i];
+            ok = put(buf, cap, &n, i ? "," : "");
+            if (ok && s.st == DSP_PKG_EMPTY) {
+                ok = put(buf, cap, &n, "{\"i\":%d,\"st\":\"empty\"}", i);
+            } else if (ok) {
+                ok = put(buf, cap, &n, "{\"i\":%d,\"st\":\"%s\",\"id\":\"%s\",\"ver\":\"%s\",\"size\":%lu,\"seq\":%lu,\"job\":%lu,\"sha256\":\"",
+                         i, dsp_pkg_state_name(s.st), s.id, s.ver, (unsigned long)s.size, (unsigned long)s.seq, (unsigned long)s.job);
+                for (int k = 0; ok && k < 32; k++) {
+                    ok = put(buf, cap, &n, "%02x", s.sha[k]);
+                }
+                ok = ok && put(buf, cap, &n, "\"}");
+            }
+        }
+        ok = ok && put(buf, cap, &n, "]}");
+    }
+    if (!ok) {
+        buf[0] = '\0';
+        return 0;
+    }
+    return n;
+}
+
+static size_t err_line(char *out, size_t cap, const char *e)
+{
+    int r = snprintf(out, cap, "E %s\n", e);
+    return (r > 0 && (size_t)r < cap) ? (size_t)r : 0;
+}
+
+size_t dsp_pkg_read_line(int slot, uint32_t off, uint32_t len, char *out, size_t cap)
+{
+    if (cap == 0) {
+        return 0;
+    }
+    if (!s_part) {
+        return err_line(out, cap, "nopart");
+    }
+    if (slot < 0 || slot >= DSP_PKG_SLOTS || s_slot[slot].st == DSP_PKG_EMPTY) {
+        return err_line(out, cap, "slot");
+    }
+    const dsp_pkg_slot_t s = s_slot[slot];
+    if (len < 1 || len > DSP_PKG_READ_MAX || off >= s.size) {
+        return err_line(out, cap, "range");
+    }
+    const uint32_t n = s.size - off < len ? s.size - off : len;     // off < size 이므로 빼기는 안전
+    uint8_t raw[DSP_PKG_READ_MAX];
+    uint16_t w[DSP_PKG_READ_MAX];
+    if (esp_partition_read(s_part, slot_base(slot) + DSP_PKG_HDR_SECTOR + off, raw, n) != ESP_OK) {
+        return err_line(out, cap, "flash");
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        w[i] = raw[i];
+    }
+    const uint32_t crc = dspimg_crc32_final(dspimg_crc32_bytes(dspimg_crc32_init(), w, n));
+    int h = snprintf(out, cap, "P %s %lu %lu %08lx ", s.id, (unsigned long)off, (unsigned long)n, (unsigned long)crc);
+    if (h < 0 || (size_t)h >= cap) {
+        return 0;
+    }
+    size_t b = bu_base64(raw, n, out + h, cap - (size_t)h);
+    if (b == 0 || (size_t)h + b + 2 > cap) {
+        return 0;
+    }
+    out[(size_t)h + b] = '\n';
+    out[(size_t)h + b + 1] = '\0';
+    return (size_t)h + b + 1;
 }

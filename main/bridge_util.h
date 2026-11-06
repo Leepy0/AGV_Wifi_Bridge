@@ -155,6 +155,27 @@ static inline bool bu_time_solve(const char *js, size_t len, int64_t up_ms, int6
     return true;
 }
 
+// RFC 4648 base64 (패딩 포함). dst 에 NUL 을 붙여 쓰고 NUL 제외 길이를 돌려준다.
+// 4*ceil(n/3)+1 이 cap 보다 크면 아무것도 쓰지 않고 0 (n == 0 이면 빈 문자열, 0)
+static inline size_t bu_base64(const uint8_t *src, size_t n, char *dst, size_t cap)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t groups = n / 3 + (n % 3 != 0);
+    if (cap == 0 || groups > (cap - 1) / 4) return 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)src[i] << 16;
+        if (i + 1 < n) v |= (uint32_t)src[i + 1] << 8;
+        if (i + 2 < n) v |= src[i + 2];
+        dst[o++] = T[v >> 18];
+        dst[o++] = T[(v >> 12) & 63];
+        dst[o++] = i + 1 < n ? T[(v >> 6) & 63] : '=';
+        dst[o++] = i + 2 < n ? T[v & 63] : '=';
+    }
+    dst[o] = '\0';
+    return o;
+}
+
 // 같은 연결(session)에서의 로그인 연속 실패 계수
 typedef struct {
     uint32_t session;

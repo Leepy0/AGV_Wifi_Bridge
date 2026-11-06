@@ -1039,6 +1039,111 @@ static void t_pkg_apply(void)
     s_state = ST_IDLE;
 }
 
+// base64 한 줄 해독 (시험용). 길이 = 해독한 바이트 수, 잘못된 글자면 -1
+static int b64_dec(const char *s, size_t n, uint8_t *out)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (n % 4) return -1;
+    int o = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t v = 0;
+        int pad = 0;
+        for (int k = 0; k < 4; k++) {
+            char c = s[i + k];
+            if (c == '=' && i + 4 == n && k >= 2) { pad++; v <<= 6; continue; }
+            const char *p = c ? strchr(T, c) : NULL;
+            if (!p || pad) return -1;
+            v = (v << 6) | (uint32_t)(p - T);
+        }
+        out[o++] = (uint8_t)(v >> 16);
+        if (pad < 2) out[o++] = (uint8_t)(v >> 8);
+        if (pad < 1) out[o++] = (uint8_t)v;
+    }
+    return o;
+}
+
+static uint32_t crc_of(const uint8_t *d, uint32_t n)
+{
+    uint16_t w[512];
+    for (uint32_t i = 0; i < n; i++) w[i] = d[i];
+    return dspimg_crc32_final(dspimg_crc32_bytes(dspimg_crc32_init(), w, n));
+}
+
+// dsp_pkg_read_line 의 한 줄을 풀어 (off, n, crc 일치, 바이트 일치) 를 확인
+static bool read_ok(int slot, uint32_t off, uint32_t len, uint32_t want_n)
+{
+    char l[800];
+    size_t r = dsp_pkg_read_line(slot, off, len, l, sizeof(l));
+    char id[17];
+    unsigned long o, n, c;
+    int used = 0;
+    uint8_t raw[512];
+    if (r == 0 || l[r - 1] != '\n' || l[r] != '\0') return false;
+    if (sscanf(l, "P %16s %lu %lu %lx %n", id, &o, &n, &c, &used) < 4 || used == 0) return false;
+    int d = b64_dec(l + used, r - 1 - (size_t)used, raw);
+    return strcmp(id, m_pkg_id) == 0 && o == off && n == want_n && d == (int)want_n && memcmp(raw, m_pkg + off, n) == 0 &&
+           c == crc_of(raw, n) && strlen(l + used) == r - (size_t)used && l[used - 1] == ' ';
+}
+
+static void t_pkg_read(void)
+{
+    printf("-- 패키지: 조각 읽기·슬롯 JSON\n");
+    // CRC32 IEEE 검사 값 고정: "123456789" -> 0xCBF43926
+    CHECK(crc_of((const uint8_t *)"123456789", 9) == 0xCBF43926u);
+
+    pkg_wipe();
+    mkpkg(1300, 3);
+    pkg_put(0, 0x1234, "1.2.3");
+    char l[800];
+    // 앞·중간·끝 조각, 끝을 넘는 len 은 줄여서
+    CHECK(read_ok(0, 0, 512, 512));
+    CHECK(read_ok(0, 500, 300, 300));
+    CHECK(read_ok(0, 1, 1, 1));
+    CHECK(read_ok(0, 1000, 512, 300));
+    CHECK(read_ok(0, 1299, 512, 1));
+    // 범위 밖: off == size · off > size · len 0 · len 513
+    CHECK(dsp_pkg_read_line(0, 1300, 1, l, sizeof(l)) == 8 && strcmp(l, "E range\n") == 0);
+    CHECK(dsp_pkg_read_line(0, 0xFFFFFFFFu, 512, l, sizeof(l)) == 8 && strcmp(l, "E range\n") == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 0, l, sizeof(l)) == 8 && strcmp(l, "E range\n") == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 513, l, sizeof(l)) == 8 && strcmp(l, "E range\n") == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 0xFFFFFFFFu, l, sizeof(l)) == 8 && strcmp(l, "E range\n") == 0);
+    // 빈 슬롯·없는 슬롯
+    CHECK(dsp_pkg_read_line(1, 0, 16, l, sizeof(l)) == 7 && strcmp(l, "E slot\n") == 0);
+    CHECK(dsp_pkg_read_line(2, 0, 16, l, sizeof(l)) == 7 && strcmp(l, "E slot\n") == 0);
+    CHECK(dsp_pkg_read_line(-1, 0, 16, l, sizeof(l)) == 7 && strcmp(l, "E slot\n") == 0);
+    // 출력 칸이 모자라면 0 (잘린 줄을 내보내지 않음). 512 B 줄은 약 735 자
+    CHECK(dsp_pkg_read_line(0, 0, 512, l, 700) == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 512, l, 0) == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 16, l, 5) == 0);
+
+    // 슬롯 JSON
+    char j[600], want[600];
+    size_t n = dsp_pkg_format_json(j, sizeof(j));
+    snprintf(want, sizeof(want),
+             "{\"slots\":[{\"i\":0,\"st\":\"STAGED\",\"id\":\"%s\",\"ver\":\"1.2.3\",\"size\":1300,\"seq\":1,\"job\":0,\"sha256\":\"%s\"},"
+             "{\"i\":1,\"st\":\"empty\"}]}", m_pkg_id, m_pkg_sha_hex);
+    CHECK(n == strlen(want) && strcmp(j, want) == 0);
+    CHECK(dsp_pkg_format_json(j, n) == 0);              // NUL 이 들어갈 칸이 없음
+    CHECK(dsp_pkg_format_json(j, 20) == 0);
+    CHECK(dsp_pkg_format_json(j, 0) == 0);
+    // 두 슬롯이 다 찬 경우: 새 패키지가 다른 슬롯에, 앞 슬롯은 APPLIED 로
+    CHECK(dsp_pkg_mark_applied(0) == NULL);
+    mkpkg(700, 4);
+    pkg_put(77, 0x5678, "1.2.4");
+    n = dsp_pkg_format_json(j, sizeof(j));
+    CHECK(n > 0 && strstr(j, "\"i\":0,\"st\":\"APPLIED\"") != NULL && strstr(j, "\"i\":1,\"st\":\"STAGED\",\"id\":\"") != NULL &&
+          strstr(j, "\"size\":700,\"seq\":2,\"job\":77,\"sha256\":\"") != NULL && strstr(j, m_pkg_sha_hex) != NULL);
+    CHECK(read_ok(1, 600, 512, 100));                   // 슬롯 1 은 새 패키지
+    CHECK(dsp_pkg_read_line(1, 700, 1, l, sizeof(l)) == 8);
+
+    // 파티션 없음
+    m_pkg_missing = true;
+    CHECK(!dsp_pkg_init());
+    CHECK(dsp_pkg_format_json(j, sizeof(j)) == 16 && strcmp(j, "{\"err\":\"nopart\"}") == 0);
+    CHECK(dsp_pkg_read_line(0, 0, 16, l, sizeof(l)) == 9 && strcmp(l, "E nopart\n") == 0);
+    pkg_wipe();
+}
+
 static void t_json_safe(void)
 {
     printf("-- 보고·상태 JSON 이스케이프\n");
@@ -1071,6 +1176,7 @@ int main(int argc, char **argv)
     t_duplicate();
     t_pkg_start();
     t_pkg_apply();
+    t_pkg_read();
     t_json_safe();
     printf(s_fail ? "%d FAILED\n" : "flow: all passed\n", s_fail);
     return s_fail ? 1 : 0;

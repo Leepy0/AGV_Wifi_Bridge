@@ -13,6 +13,7 @@
 #define DSP_PKG_SLOT_SIZE   0x600000u
 #define DSP_PKG_HDR_SECTOR  0x1000u
 #define DSP_PKG_MAX         (DSP_PKG_SLOT_SIZE - DSP_PKG_HDR_SECTOR)    // 6,287,360 B
+#define DSP_PKG_READ_MAX    512                     // dsp_pkg_read_line 한 번에 읽는 최대 바이트
 
 typedef enum { DSP_PKG_EMPTY, DSP_PKG_STAGED, DSP_PKG_APPLIED, DSP_PKG_OLD } dsp_pkg_state_t;
 
@@ -44,3 +45,9 @@ const char *dsp_pkg_verify(int slot);               // flash 에서 sha256 을 �
 const char *dsp_pkg_mark_applied(int slot);         // bit1 → 0, 다른 슬롯이 APPLIED 였으면 그 슬롯 bit2 → 0
 // 'dsp pkg' 출력 (슬롯마다 한 줄). staged_crc = 스테이징된 .dspfw 파일 CRC (짝 표시, 0 = 없음)
 size_t      dsp_pkg_format(char *buf, size_t cap, uint32_t staged_crc);
+// 'dsp pkg json' 출력: {"slots":[{"i":0,"st":..,"id":..,"ver":..,"size":..,"seq":..,"job":..,"sha256":..},{"i":1,"st":"empty"}]}
+// 파티션이 없으면 {"err":"nopart"}. 줄바꿈은 붙이지 않는다. 칸이 모자라면 0 (잘린 JSON 을 내보내지 않음)
+size_t      dsp_pkg_format_json(char *buf, size_t cap);
+// 'dsp pkg read' 한 줄 (\n 포함): 성공 "P <id> <off> <n> <crc32 소문자 8자리> <base64>", 실패 "E nopart|slot|range|flash".
+// off 는 패키지 시작 기준 (슬롯 머리 4KB 제외). len 은 1~DSP_PKG_READ_MAX, n = min(len, size - off). 칸이 모자라면 0
+size_t      dsp_pkg_read_line(int slot, uint32_t off, uint32_t len, char *out, size_t cap);
