@@ -506,14 +506,21 @@ size_t dsp_pkg_read_line(int slot, uint32_t off, uint32_t len, char *out, size_t
     }
     const uint32_t n = s.size - off < len ? s.size - off : len;     // off < size 이므로 빼기는 안전
     uint8_t raw[DSP_PKG_READ_MAX];
-    uint16_t w[DSP_PKG_READ_MAX];
     if (esp_partition_read(s_part, slot_base(slot) + DSP_PKG_HDR_SECTOR + off, raw, n) != ESP_OK) {
         return err_line(out, cap, "flash");
     }
-    for (uint32_t i = 0; i < n; i++) {
-        w[i] = raw[i];
+    // dspimg_crc32_bytes 는 uint16_t 배열을 받는다 — 작은 배열로 나눠 먹여 스택을 아낀다
+    uint16_t w[32];
+    uint32_t c = dspimg_crc32_init();
+    for (uint32_t i = 0; i < n;) {
+        uint32_t k = n - i < 32 ? n - i : 32;
+        for (uint32_t j = 0; j < k; j++) {
+            w[j] = raw[i + j];
+        }
+        c = dspimg_crc32_bytes(c, w, k);
+        i += k;
     }
-    const uint32_t crc = dspimg_crc32_final(dspimg_crc32_bytes(dspimg_crc32_init(), w, n));
+    const uint32_t crc = dspimg_crc32_final(c);
     int h = snprintf(out, cap, "P %s %lu %lu %08lx ", s.id, (unsigned long)off, (unsigned long)n, (unsigned long)crc);
     if (h < 0 || (size_t)h >= cap) {
         return 0;
