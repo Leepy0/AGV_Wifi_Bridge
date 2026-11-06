@@ -181,6 +181,9 @@ int main(void)
     CHECK(s_pkg_fmt == 2);
     run("help", CMD_SRC_SERVER, out, sizeof(out), &act);
     CHECK(strstr(out, "dsp [ver|apply|pkg]") != NULL);
+    CHECK(strstr(out, "dsp pkg json") == NULL && strstr(out, "dsp pkg read") == NULL);
+    run("help", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    CHECK(strstr(out, "dsp pkg json | dsp pkg read <slot> <off> <len>") != NULL);
 
     // dsp pkg json / read: 현장(BLE·USB)만, 굽기·스테이징 중엔 busy
     run("dsp pkg json", CMD_SRC_LOCAL, out, sizeof(out), &act);

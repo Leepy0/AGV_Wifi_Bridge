@@ -231,7 +231,7 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
     }
     if (strcmp(cmd, "help") == 0) {
         return clamp(snprintf(out, cap, "cfg [json] | set <key> <value> | save | discard | reboot | stat [json] | time | scan | nettest [host] | setup [on|off] | dsp [ver|apply|pkg]%s\n",
-                              src == CMD_SRC_LOCAL ? " | defaults" : ""), cap);
+                              src == CMD_SRC_LOCAL ? " | dsp pkg json | dsp pkg read <slot> <off> <len> | defaults" : ""), cap);
     }
     return clamp(snprintf(out, cap, "unknown command '%s' - type help\n", cmd), cap);
 }

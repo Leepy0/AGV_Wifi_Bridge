@@ -22,9 +22,9 @@ size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act
 // 'cfg json' 본문 (콘솔 cfg json 과 공용)
 size_t cmd_cfg_json(char *out, size_t cap);
 // 'scan' · 'nettest [host]' (콘솔과 공용). 메인보드 굽기·스테이징 중에는 busy 로 거부. 수 초 블로킹
+size_t cmd_scan(char *out, size_t cap);
+size_t cmd_nettest(const char *host, char *out, size_t cap);
 // 'dsp pkg json' · 'dsp pkg read <slot> <off> <len>' (콘솔과 공용, 현장 전용 — UDP 는 cmd_exec 가 거부).
 // 응답은 줄바꿈으로 끝남. 굽기·스테이징 중에는 busy. read 의 out 은 726 B 이상, 숫자가 아니거나 32비트를 넘으면 "E range"
 size_t cmd_pkg_json(char *out, size_t cap);
 size_t cmd_pkg_read(const char *slot, const char *off, const char *len, char *out, size_t cap);
-size_t cmd_scan(char *out, size_t cap);
-size_t cmd_nettest(const char *host, char *out, size_t cap);

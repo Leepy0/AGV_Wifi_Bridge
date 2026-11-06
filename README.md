@@ -1,6 +1,6 @@
 # AGV Wi-Fi Bridge (ESP32-S3 + BOB-11189)
 
-ZigBee 통신보드 대체용 브리지입니다. 현재 버전 **v0.9.0** (게이트웨이 서버 v0.4.0 과 함께 씁니다. 서버 0.3.x 와는 512바이트까지만 통신됩니다. 메인보드 OTA 는 게이트웨이 **0.7.0 이상** 이 필요합니다).
+ZigBee 통신보드 대체용 브리지입니다. 현재 버전 **v0.9.1** (게이트웨이 서버 v0.4.0 과 함께 씁니다. 서버 0.3.x 와는 512바이트까지만 통신됩니다. 메인보드 OTA 는 게이트웨이 **0.7.0 이상** 이 필요합니다).
 
 > **보드: ESP32-S3 N16 (플래시 16MB) 전용** — 0.9.0 부터 4MB 보드는 지원하지 않습니다. 메인보드에 굽는 프로그램의 패키지(.dsppkg)를 브리지 flash 에 보관하기 때문입니다 ([메인보드 펌웨어 OTA](#메인보드tms320f2808-펌웨어-ota)).
 
@@ -150,7 +150,7 @@ cfg 7 save
 cfg 7 reboot
 ```
 
-명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup [on|off]` | `dsp [ver|apply|pkg]` | `help` (`defaults` 는 원격에서 불가)
+명령: `cfg` | `set <key> <value>` | `save` | `reboot` | `stat` | `setup [on|off]` | `dsp [ver|apply|pkg]` (`dsp pkg json` · `dsp pkg read <slot> <off> <len>` 은 원격에서 불가) | `help` (`defaults` 는 원격에서 불가)
 
 - **원격 저장은 확인 대기 상태로 저장됩니다.** 답은 `saved (trial) - 'reboot' to apply. After reboot the bridge needs a server packet within 180 s or it restores the previous config (gateway 0.3.0+ pings automatically)` 입니다.
 - 재부팅 후 180초 안에 서버에서 하향 패킷(PING 등)을 받지 못하면 저장 직전 설정으로 되돌리고 다시 재부팅합니다. SSID·IP·서버 주소를 잘못 넣어도 호기와 연결이 끊긴 채로 남지 않습니다(OTA 롤백과 같은 기준).
@@ -190,7 +190,7 @@ cfg 7 reboot
 
 - 비밀번호 기본값은 `agvsetup` 입니다(전 호기 공통). 바꾸려면 menuconfig 에서 바꿔 직접 빌드합니다. 새로 연결할 때마다 `login` 이 필요합니다.
 - 비밀번호가 틀리면 1초 뒤 `wrong password` 가 옵니다. **같은 연결에서 5번 연속 틀리면** `wrong password - too many failures, disconnecting` 을 보내고 연결을 끊습니다. 다시 접속하면 다시 시도할 수 있습니다.
-- 명령: `login` · `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup [on|off]` · `dsp [ver|apply|pkg]` · `help`. 현장 저장이라 즉시 확정됩니다.
+- 명령: `login` · `cfg` · `set` · `save` · `reboot` · `stat` · `defaults` · `setup [on|off]` · `dsp [ver|apply|pkg]` · `dsp pkg json` · `dsp pkg read <slot> <off> <len>` · `help`. 현장 저장이라 즉시 확정됩니다.
 - 휴대폰 연결 없이 Wi-Fi 연결 상태로 5분이 지나면 설정 모드가 자동으로 닫힙니다. Wi-Fi 미연결 상태에서는 유일한 접근 경로이므로 닫지 않습니다.
 - **BLE 는 설정 모드 동안만 켭니다.** Wi-Fi 와 무선부(2.4GHz)를 나눠 쓰기 때문에, 휴대폰이 연결된 동안에는 Wi-Fi 지연이 늘 수 있습니다. 설정 모드가 닫히면 BT 컨트롤러를 완전히 내려 평상시 성능에는 영향이 없습니다. 운용 중 호기는 **AGV 정지 상태에서** 여세요.
 - ESP32-S3 는 BLE 만 지원합니다. 클래식 블루투스(SPP) 전용 앱으로는 보이지 않습니다.
@@ -285,7 +285,7 @@ info 7                                      # 메인보드 앱/부트로더 버�
 - 이미지(.dspfw)는 CCS 빌드 결과를 `tools/dsp_pack.py` 로 만듭니다. 버전은 **영문·숫자·`.` `_` `-` 로 1~8자** 가 필수이고, 어기면 패킹이 실패합니다. `dsp_pack.py info` 와 `dsp_flash.py` 는 파일을 읽을 때 블록이 주소 오름차순이고 겹치지 않는지 검사합니다(브리지 · 게이트웨이와 같은 규칙). 벤치에서 브리지 없이 PC 에서 직접 구울 때는 `tools/dsp_flash.py COM5 app.dsppkg --enter 7`(`.dspfw` 도 됨).
 - 앱 헤더(CRC)를 마지막에 쓰므로 쓰는 중 전원이 끊겨도 부트로더가 대기하고, 다시 적용하면 됩니다. 롤백 슬롯은 없고 이전 이미지를 다시 적용합니다.
 - 적용 중(20~30초) 메인보드 앱과 RFID 바이패스가 멈춥니다. **AGV 정지 상태**에서만, 앱도 주행 중이면 거부(`app_ng_01`)합니다. 앱은 안전 확인 콜백을 반드시 넘겨야 하고, 넘기지 않으면 진입을 항상 거부(`app_ng_09`)합니다.
-- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply` / `dsp pkg` (보관 패키지).
+- 브리지 콘솔: `dsp` (상태) / `dsp ver` / `dsp apply` / `dsp pkg` (보관 패키지) / `dsp pkg json` / `dsp pkg read <slot> <off> <len>` (0.9.1~, 현장 연결 전용 읽기).
 - **파티션 변경**: 0.9.0 은 16MB 보드에 `dsppkg`(0x400000, 12MB)를 추가합니다. 기존 항목 위치는 그대로라 **파티션 표 + 앱만** 다시 구우면 호기 설정이 남습니다([FLASH_GUIDE](docs/FLASH_GUIDE.md) 3장 B 방법). 이전 표인 채 OTA 로 0.9.0 을 받은 브리지는 `pkg_st=nopart` 를 보고하고 메인보드 스테이징·적용을 `pkg_nopart` 로 거부합니다(부팅 로그·`dsp` 에도 표시).
 - 0.5.0 부터 OTA 슬롯 1.75MB + `dspfw` 384KB. 그 이전 버전 브리지는 USB 로 한 번 전체를 다시 구워야 합니다.
   구 파티션 테이블인 채 OTA 로 0.5.x 를 받은 브리지는 `dsp_st` 를 `nopart` 로 보고하고 메인보드 OTA 명령을 `no_partition` 으로 거부합니다(0.5.1 부터. 0.5.0 은 이 경우 재부팅).

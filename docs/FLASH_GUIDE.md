@@ -923,6 +923,7 @@ python dsp_pack.py info AGV07.dsppkg                     # 내용 확인 (.out �
 | `setup` · `setup on` · `setup off` | ○ | ○ | ○ | 설정 모드 상태 / 열기 / 닫기 |
 | `dsp` · `dsp ver` · `dsp apply` | ○ | ○ | ○ | 메인보드 상태 / 버전 다시 조회 (응답 없으면 `?`) / 스테이징된 이미지 적용 (작업 번호 검사 없음, 짝 패키지 필요) |
 | `dsp pkg` | ○ | ○ | ○ | 보관 패키지 슬롯 2개: STAGED / APPLIED / OLD / empty, id, ver, size, seq, job (읽기 전용) |
+| `dsp pkg json` · `dsp pkg read <slot> <off> <len>` | ○ | ○ | × | 보관 패키지 목록 JSON / 조각 읽기 (읽기 전용, 0.9.1~). 굽기·스테이징 중에는 busy |
 | `mon 0` · `mon 1` | ○ | × | × | 모든 프레임 hex 덤프 (벤치) |
 | `ota` · `ota <url>` · `ota confirm` | ○ | × | × | 펌웨어 상태 / 수동 OTA (호스트 = `server` IP) / 롤백 대기 수동 확정 |
 | `login <비밀번호>` | — | ○ | — | BLE 연결마다 먼저. 같은 연결에서 5번 연속 틀리면 끊김 |
