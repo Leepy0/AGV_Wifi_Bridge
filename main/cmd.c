@@ -105,7 +105,8 @@ size_t cmd_pkg_read(const char *slot, const char *off, const char *len, char *ou
         return clamp(snprintf(out, cap, "E range\n"), cap);
     }
     size_t n = dsp_pkg_read_line((int)s, o, l, out, cap);
-    return n ? n : clamp(snprintf(out, cap, "E range\n"), cap);
+    // 0 은 칸 부족이다. range 로 답하면 앱이 패키지가 바뀐 줄 알고 받은 부분을 지운다
+    return n ? n : clamp(snprintf(out, cap, "E flash\n"), cap);
 }
 
 size_t cmd_exec(char *line, cmd_src_t src, char *out, size_t cap, cmd_act_t *act)

@@ -33,9 +33,11 @@ size_t net_test(const char *host, char *buf, size_t cap) {
 size_t dsp_ota_format(char *buf, size_t cap) { buf[0] = '\0'; return 0; }
 static int s_pkg_json, s_pkg_read;
 static uint32_t s_rd_slot, s_rd_off, s_rd_len;
+static int s_rd_no_room;
 size_t dsp_pkg_format_json(char *buf, size_t cap) { s_pkg_json++; return (size_t)snprintf(buf, cap, "{\"slots\":[{\"i\":0,\"st\":\"empty\"}]}"); }
 size_t dsp_pkg_read_line(int slot, uint32_t off, uint32_t len, char *out, size_t cap) {
     s_pkg_read++; s_rd_slot = (uint32_t)slot; s_rd_off = off; s_rd_len = len;
+    if (s_rd_no_room) return 0;
     if (slot < 0 || slot > 1) return (size_t)snprintf(out, cap, "E slot\n");
     return (size_t)snprintf(out, cap, "P abc %u 1 00000000 AA==\n", (unsigned)off);
 }
@@ -200,6 +202,10 @@ int main(void)
     CHECK(s_pkg_read == 2 && strcmp(out, "E local_only\n") == 0);
     run("dsp pkg read 2 0 1", CMD_SRC_LOCAL, out, sizeof(out), &act);
     CHECK(strcmp(out, "E slot\n") == 0);
+    s_rd_no_room = 1;                                           // 칸 부족은 range 가 아니다: 앱이 range 면 받은 부분을 지운다
+    run("dsp pkg read 0 0 512", CMD_SRC_LOCAL, out, sizeof(out), &act);
+    s_rd_no_room = 0;
+    CHECK(strcmp(out, "E flash\n") == 0);
     int rd = s_pkg_read;
     const char *bad[] = { "dsp pkg read", "dsp pkg read 0", "dsp pkg read 0 0", "dsp pkg read x 0 1", "dsp pkg read 0 -1 1",
                           "dsp pkg read 0 4294967296 1", "dsp pkg read 0 0 99999999999", "dsp pkg read 0 1a 1" };

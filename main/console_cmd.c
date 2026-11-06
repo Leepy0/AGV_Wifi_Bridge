@@ -260,6 +260,7 @@ void console_start(void)
     esp_console_repl_config_t rc = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     rc.prompt = "bridge>";
     rc.max_cmdline_length = 160;
+    rc.task_stack_size = 6144;      // dsp pkg read 가 콘솔 태스크 스택에 512 B 버퍼를 잡는다
 
     esp_err_t err = ESP_ERR_NOT_SUPPORTED;
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
